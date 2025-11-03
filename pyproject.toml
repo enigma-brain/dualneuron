@@ -14,7 +14,8 @@ dependencies = [
 	"nnvision @ git+https://github.com/KonstantinWilleke/nnvision.git@interview",
 	"datasets",
 	"opencv-python",
-	"python-dotenv"
+	"python-dotenv",
+	"dreamsim"
 ]
 
 [tool.setuptools.packages.find]
