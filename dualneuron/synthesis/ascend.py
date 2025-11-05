@@ -14,11 +14,28 @@ from dualneuron.synthesis.ops import (
 )
 
 
-def buffer(path):
+def buffer(path, target_size=None):
     """Load precomputed magnitude spectrum"""
     base_dir = os.path.dirname(os.path.abspath(__file__))
     path = os.path.join(base_dir, 'priors', path)
     magnitude = torch.tensor(np.load(path), dtype=torch.float32)
+    
+    if target_size is not None:
+        if isinstance(target_size, int):
+            target_size = (target_size, target_size)
+        
+        current_size = magnitude.shape[-2:]
+        
+        if current_size != target_size:
+            magnitude = magnitude.unsqueeze(0)
+            magnitude = F.interpolate(
+                magnitude,
+                size=target_size,
+                mode='bilinear',
+                align_corners=False
+            )
+            magnitude = magnitude.squeeze(0)
+            
     phase = torch.rand_like(magnitude) * 2 * np.pi - np.pi
     return magnitude, phase
 
@@ -91,6 +108,7 @@ def optimization_step(
 def fourier_ascending(
     objective_function,
     magnitude_path,
+    image_size=None,
     total_steps=128,
     learning_rate=1.0,
     lr_schedule=True,
@@ -108,7 +126,7 @@ def fourier_ascending(
     verbose=False
 ):
     assert values_range[1] >= values_range[0]
-    magnitude, phase = buffer(magnitude_path)
+    magnitude, phase = buffer(magnitude_path, target_size=image_size)
     channels = magnitude.shape[0]
     image_size = magnitude.shape[1]
     

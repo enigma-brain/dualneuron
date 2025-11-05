@@ -51,6 +51,16 @@ class NormTransform:
         return tensor
 
 
+class ClipTransform:
+    """Custom transform for clipping tensor values"""
+    def __init__(self, min_val=0.0, max_val=1.0):
+        self.min_val = min_val
+        self.max_val = max_val
+        
+    def __call__(self, tensor):
+        return torch.clamp(tensor, self.min_val, self.max_val)
+    
+
 class EnsureRGB:
     def __call__(self, img):
         if img.mode != 'RGB':
@@ -71,12 +81,15 @@ class ImagenetImages(Dataset):
         use_normalize=False,
         use_mask=False,
         use_norm=False,
+        use_clip=False,
         # Transform parameters
         mask=None,
         num_channels=None,
         output_size=(224, 224),
         crop_size=236,
         bg_value=0.0,
+        clip_min=0.0,
+        clip_max=1.0,
         norm=None,
     ):
         """
@@ -169,6 +182,9 @@ class ImagenetImages(Dataset):
             if norm is None:
                 raise ValueError("norm parameter required when use_norm=True")
             tlist.append(NormTransform(norm))
+            
+        if use_clip:
+            tlist.append(ClipTransform(clip_min, clip_max))
         
         self.transform = transforms.Compose(tlist)
     
@@ -210,12 +226,15 @@ class RenderedImages(Dataset):
         use_normalize=False,
         use_mask=False,
         use_norm=False,
+        use_clip=False,
         # Transform parameters
         mask=None,
         num_channels=None,
         output_size=(224, 224),
         crop_size=236,
         bg_value=0.0,
+        clip_min=0.0,
+        clip_max=1.0,
         norm=None,
     ):
         """
@@ -288,6 +307,9 @@ class RenderedImages(Dataset):
             if norm is None:
                 raise ValueError("norm parameter required when use_norm=True")
             tlist.append(NormTransform(norm))
+            
+        if use_clip:
+            tlist.append(ClipTransform(clip_min, clip_max))
         
         self.transform = transforms.Compose(tlist)
     

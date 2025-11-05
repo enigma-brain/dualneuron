@@ -42,7 +42,6 @@ def create_crops(
     device = image.device
     C, H, W = image.shape
     s, b = box_size
-    assert b >= s
 
     pad = int(reflect_pad_frac * min(H, W))
     if pad > 0:
