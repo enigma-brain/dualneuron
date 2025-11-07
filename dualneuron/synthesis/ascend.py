@@ -14,7 +14,7 @@ from dualneuron.synthesis.ops import (
 )
 
 
-def buffer(path, target_size=None):
+def buffer(path, init_image=None, target_size=None):
     """Load precomputed magnitude spectrum"""
     base_dir = os.path.dirname(os.path.abspath(__file__))
     path = os.path.join(base_dir, 'priors', path)
@@ -36,23 +36,41 @@ def buffer(path, target_size=None):
             )
             magnitude = magnitude.squeeze(0)
             
-    phase = torch.rand_like(magnitude) * 2 * np.pi - np.pi
+    if init_image is not None:
+        if not torch.is_tensor(init_image):
+            init_image = torch.tensor(init_image, dtype=torch.float32)
+        
+        if init_image.ndim == 3 and init_image.shape[0] not in [1, 3]:
+            init_image = init_image.permute(2, 0, 1)  # HWC -> CHW
+        
+        expected_size = magnitude.shape[-2:]
+        if init_image.shape[-2:] != expected_size:
+            init_image = F.interpolate(
+                init_image.unsqueeze(0),
+                size=expected_size,
+                mode='bilinear',
+                align_corners=False
+            ).squeeze(0)
+        
+        spectrum = torch.fft.fft2(init_image)
+        phase = torch.angle(spectrum)
+    else:
+        phase = torch.rand_like(magnitude) * 2 * np.pi - np.pi
+            
     return magnitude, phase
 
 
 def precondition(magnitude, phase, values_range, range_fn, device):
     l, h = values_range
     assert h >= l
-
     spectrum = torch.complex(
         torch.cos(phase) * magnitude,
         torch.sin(phase) * magnitude
     )
     # spectrum = magnitude * torch.exp(1j * phase)
     image = torch.fft.ifft2(spectrum).real
-
-    c = magnitude.shape[0]    
-    if c == 3: image = recorrelate_colors(image, device)
+    if magnitude.shape[0] == 3: 
+        image = recorrelate_colors(image, device)
     if range_fn == 'linear':
         image = torch.clamp(image, l, h)
     elif range_fn == 'sigmoid':
@@ -109,6 +127,7 @@ def fourier_ascending(
     objective_function,
     magnitude_path,
     image_size=None,
+    init_image=None,
     total_steps=128,
     learning_rate=1.0,
     lr_schedule=True,
@@ -123,10 +142,15 @@ def fourier_ascending(
     oversample=1, 
     reflect_pad_frac=0.02,
     device='cuda',
-    verbose=False
+    verbose=False,
+    save_all_steps=False
 ):
     assert values_range[1] >= values_range[0]
-    magnitude, phase = buffer(magnitude_path, target_size=image_size)
+    magnitude, phase = buffer(
+        magnitude_path, 
+        init_image=init_image, 
+        target_size=image_size
+    )
     channels = magnitude.shape[0]
     image_size = magnitude.shape[1]
     
@@ -150,6 +174,30 @@ def fourier_ascending(
     transparency = torch.zeros((3, image_size, image_size)).to(device)
     activations = []
 
+    if save_all_steps:
+        images = []
+        alphas = []
+    else:
+        images = None
+        alphas = None
+    
+    if save_all_steps:
+        with torch.no_grad():
+            if init_image is None:
+                init_image = precondition(
+                    magnitude, phase, 
+                    values_range, range_fn, 
+                    device
+                )
+                
+                if target_norm is not None:
+                    init_image = change_norm(init_image, target_norm)
+
+            init_image = init_image.to(device)
+            init_act = objective_function(init_image.unsqueeze(0)).item()
+            images.append(init_image.detach().cpu())
+            activations.append(abs(init_act))
+            
     if verbose:
         pbar = tqdm(range(total_steps))
     else:
@@ -179,7 +227,7 @@ def fourier_ascending(
 
         with torch.no_grad():
             clean_img = precondition(
-                magnitude, phase, 
+                magnitude, phase,
                 values_range, range_fn, 
                 device
             )
@@ -189,13 +237,30 @@ def fourier_ascending(
             
             act = objective_function(clean_img.unsqueeze(0)).item()
             activations.append(abs(act))
-        
+
+            if save_all_steps:
+                images.append(clean_img.detach().cpu())
+                alpha = transparency / (transparency.max() + 1e-8)
+                if channels == 1:
+                    alpha = alpha.mean(dim=0, keepdim=True)
+                
+                alphas.append(alpha.detach().cpu())
+            
         if verbose:
             pbar.set_description(f"Activation: {abs(act):.4f}")
 
     transparency = transparency / (transparency.max() + 1e-8)
-    if channels == 1: transparency = transparency.mean(dim=0, keepdim=True)
-    return clean_img, transparency, activations
+    if channels == 1: 
+        transparency = transparency.mean(dim=0, keepdim=True)
+    
+    if save_all_steps and len(alphas) > 0:
+        alphas = [alphas[0]] + alphas
+    
+    return {
+        'image': images if save_all_steps else clean_img, 
+        'alpha': alphas if save_all_steps else transparency, 
+        'activation': activations if save_all_steps else activations[-1]
+    }
 
 
 def pixel_ascending(

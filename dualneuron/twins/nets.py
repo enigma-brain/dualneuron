@@ -230,22 +230,3 @@ def resnet50():
     return model
 
 
-class WrapLayer:
-    """Captures activations from a specific layer using hooks."""
-    
-    def __init__(self, model, layer):
-        self.model = model
-        self.activation = None
-        self.hook = layer.register_forward_hook(self._hook_fn)
-    
-    def _hook_fn(self, module, input, output):
-        self.activation = output
-    
-    def __call__(self, images):
-        """Run forward pass and return captured activation."""
-        self.activation = None
-        _ = self.model(images)
-        return self.activation
-    
-    def remove(self):
-        self.hook.remove()
