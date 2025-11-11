@@ -1,5 +1,7 @@
 # DualNeuron
 
+![DualNeuron Logo](assets/output.png)
+
 A toolkit for synthesizing and screening stimuli that maximally activate neurons in visual cortex areas V1 and V4.
 
 ## Overview

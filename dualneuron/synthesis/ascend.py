@@ -91,7 +91,10 @@ def total_variation_loss(image, weight=1e-4):
 
 
 def optimization_step(
-    objective_function, 
+    objective_function,
+    simulation_function,
+    simulation_axis,
+    simulation_weight,
     image, 
     box_size, 
     noise_level, 
@@ -117,9 +120,28 @@ def optimization_step(
     if target_norm is not None:
         processed = change_norm(processed, target_norm)
 
-    score = objective_function(processed)
+    activation = objective_function(processed)
     tv_loss = total_variation_loss(image, weight=tv_weight)
-    loss = -score + tv_loss
+    loss = -activation + tv_loss
+    
+    if simulation_function is not None and simulation_axis is not None:
+        img = (image - image.min()) / (image.max() - image.min() + 1e-8)
+        img = F.interpolate(
+            img.unsqueeze(0), 
+            size=(224, 224), 
+            mode='bilinear', 
+            align_corners=False
+        )
+        
+        if img.shape[1] == 1:
+            img = img.repeat(1, 3, 1, 1)
+
+        embedding = simulation_function(img).flatten()
+        projection = torch.dot(embedding, simulation_axis)
+        axis_loss = -simulation_weight * projection
+        
+        loss = loss + axis_loss
+        
     return loss, image
 
 
@@ -131,6 +153,7 @@ def fourier_ascending(
     total_steps=128,
     learning_rate=1.0,
     lr_schedule=True,
+    eta_min=0.0,
     noise=0.01,
     values_range=(-2., 2.),
     range_fn='linear',
@@ -141,6 +164,9 @@ def fourier_ascending(
     jitter_std=0.1,
     oversample=1, 
     reflect_pad_frac=0.02,
+    simulation_function=None,    # ← ADD
+    simulation_axis=None,         # ← ADD
+    simulation_weight=0.0,        # ← ADD
     device='cuda',
     verbose=False,
     save_all_steps=False
@@ -166,7 +192,8 @@ def fourier_ascending(
     if lr_schedule:
         scheduler = CosineAnnealingLR(
             optimizer, 
-            T_max=total_steps
+            T_max=total_steps,
+            eta_min=eta_min
         )
     else:
         scheduler = None
@@ -198,6 +225,13 @@ def fourier_ascending(
             images.append(init_image.detach().cpu())
             activations.append(abs(init_act))
             
+    if simulation_axis is not None:
+        simulation_axis = torch.tensor(
+            simulation_axis, 
+            device=device, 
+            dtype=torch.float32
+        )
+            
     if verbose:
         pbar = tqdm(range(total_steps))
     else:
@@ -213,7 +247,11 @@ def fourier_ascending(
         )
 
         loss, img = optimization_step(
-            objective_function, img, box_size, noise,
+            objective_function, 
+            simulation_function,      # ← ADD
+            simulation_axis,          # ← ADD
+            simulation_weight,        # ← ADD
+            img, box_size, noise,
             nb_crops, image_size, target_norm, tv_weight,
             jitter_std, oversample, reflect_pad_frac
         )
