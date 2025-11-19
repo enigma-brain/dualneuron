@@ -164,9 +164,9 @@ def fourier_ascending(
     jitter_std=0.1,
     oversample=1, 
     reflect_pad_frac=0.02,
-    simulation_function=None,    # ← ADD
-    simulation_axis=None,         # ← ADD
-    simulation_weight=0.0,        # ← ADD
+    simulation_function=None,
+    simulation_axis=None,
+    simulation_weight=0.0,
     device='cuda',
     verbose=False,
     save_all_steps=False
@@ -248,9 +248,9 @@ def fourier_ascending(
 
         loss, img = optimization_step(
             objective_function, 
-            simulation_function,      # ← ADD
-            simulation_axis,          # ← ADD
-            simulation_weight,        # ← ADD
+            simulation_function,
+            simulation_axis,
+            simulation_weight,
             img, box_size, noise,
             nb_crops, image_size, target_norm, tv_weight,
             jitter_std, oversample, reflect_pad_frac

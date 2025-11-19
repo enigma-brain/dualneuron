@@ -1,12 +1,16 @@
 import warnings
 warnings.filterwarnings('ignore')
-
 import torch
 import os
 import numpy as np
 from mei.modules import EnsembleModel
 from nnfabrik.builder import get_model
 import torchvision.models as models
+
+from dualneuron.twins.activations import (
+    ActivationExtractor, 
+    count_units
+)
 
 
 def V4ColorTaskDriven(
@@ -222,11 +226,67 @@ def V4GrayTaskDriven(
     return model
 
 
-def resnet50():
-    """
-    Loads a torchvision ImageNet pretrained ResNet-50.
-    """
-    model = models.resnet50(weights='IMAGENET1K_V1')
+def load_model(
+    architecture='v4', 
+    layer=None, 
+    ensemble=False, 
+    centered=True, 
+    untrained=False,
+    device='cuda'
+):
+    assert architecture in [
+        'v4', 'v1', 'v4g',
+        'vgg16', 
+        'vgg16_bn', 
+        'resnet50', 
+        'vit_b_16'
+    ]
+    if architecture == 'v4':
+        model = V4ColorTaskDriven(
+            ensemble=ensemble, 
+            centered=centered, 
+            untrained=untrained
+        )
+    elif architecture == 'v1':
+        model = V1GrayTaskDriven(
+            ensemble=ensemble, 
+            centered=centered,
+            untrained=untrained
+        )   
+    elif architecture == 'v4g':
+        model = V4GrayTaskDriven(
+            ensemble=ensemble, 
+            centered=centered, 
+            untrained=untrained
+        )
+    else:
+        if untrained:
+            model = models.__dict__[architecture](weights=None)
+        else:
+            model = getattr(models, architecture)(weights='IMAGENET1K_V1')
+
+    model = model.eval().to(device)
+    if layer is not None:
+        model = ActivationExtractor(model=model, layer=layer)
     return model
 
 
+def model_summary(model, input_size=(1, 3, 100, 100), device='cuda'):
+    model = load_model(architecture=model, device=device)
+    dummy_input = torch.randn(input_size).to(next(model.parameters()).device)
+    extractor = ActivationExtractor(model)
+    activations = extractor.get_all_activations(dummy_input)
+
+    total_units = 0
+    print(f"\n{'Layer':<60} {'Shape':<25} {'Units'}")
+    print('-'*95)
+
+    for name, activation in activations.items():
+        shape = tuple(activation.shape)
+        num_units = count_units(shape)
+        if num_units:
+            total_units += num_units
+            print(f"{name:<60} {str(shape):<25} {num_units:>8,}")
+
+    print(f"Total units: {total_units:,}")
+    return model, activations

@@ -4,6 +4,7 @@ import os
 import pandas as pd
 import matplotlib.pyplot as plt
 from glob import glob
+from dualneuron.screening.utils import sample_activations_adaptively
 
 
 def plot_population_statistics(response_stats, figsize=(12, 8)):
@@ -208,4 +209,55 @@ def plot_neuron_poles(
         color='white', fontsize=16, y=1.0
     )
     
+    plt.show()
+    
+    
+def visualize_adaptive_sampling(responses, num_samples=100, figsize=(5, 5)):
+    """Visualize which points were sampled along the activation curve."""
+    
+    sampled_idx, sorted_responses, sampled_positions = sample_activations_adaptively(
+        responses, num_samples
+    )
+    
+    fig, ax = plt.subplots(figsize=figsize, facecolor='black')
+    ax.plot(sorted_responses, color='#00d4ff', linewidth=1.5, alpha=0.8)
+    ax.fill_between(
+        range(len(sorted_responses)), 
+        sorted_responses, 
+        color='#00d4ff', 
+        alpha=0.3
+    )
+    
+    ax.scatter(
+        sampled_positions, 
+        sorted_responses[sampled_positions], 
+        c='#ff0080', 
+        s=30, 
+        zorder=5, 
+        alpha=0.8,
+        label=f'Sampled (n={num_samples})'
+    )
+    
+    ax.set_facecolor('#0a0a0a')
+    ax.spines['bottom'].set_color('white')
+    ax.spines['left'].set_color('white')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.tick_params(colors='white', labelsize=9)
+    ax.grid(True, alpha=0.15, color='white', axis='y')
+    
+    ax.set_title(
+        'Adaptive Sampling\nMore samples where curve changes rapidly', 
+        color='white', fontsize=11, pad=10
+    )
+    ax.set_xlabel('Sorted Image Index', color='white', fontsize=10)
+    ax.set_ylabel('Response', color='white', fontsize=10)
+    
+    ax.legend(
+        loc='upper left', fontsize=9, 
+        facecolor='#0a0a0a', edgecolor='white', 
+        labelcolor='white'
+    )
+    
+    plt.tight_layout()
     plt.show()

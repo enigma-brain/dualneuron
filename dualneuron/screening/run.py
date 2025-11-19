@@ -3,7 +3,8 @@ warnings.filterwarnings("ignore")
 
 from pathlib import Path
 from dualneuron.screening.sets import ImagenetImages, RenderedImages
-from dualneuron.twins.nets import V1GrayTaskDriven, V4ColorTaskDriven
+from dualneuron.twins.nets import load_model
+from dualneuron.twins.activations import get_layer_info, get_spatial_activation
 import dualneuron
 
 import os
@@ -18,61 +19,66 @@ from torch.utils.data import DataLoader
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 rng = np.random.RandomState(123)
-    
 
-def activations(
-    data_dir, 
+
+def screen_activations(
+    data_dir,
     output_dir=None,
-    token=None, 
-    split='train', 
-    dataset="rendered", 
-    area='v4',
-    layer='neurons',
+    token=None,
+    split='train',
+    dataset="rendered",
+    model='v4',
+    layer=None,
+    location='center',
     ensemble=True,
     batch_size=32,
     num_workers=0,
+    device="cuda"
 ):
-    assert layer in ['neurons', 'features']
-    assert area in ['v1', 'v4']
+
     assert dataset in ['rendered', 'imagenet']
+
+    function = load_model(
+        architecture=model,
+        layer=layer,
+        ensemble=ensemble,
+        centered=True,
+        device=device
+    )
     
-    if area == 'v4':
-        model = V4ColorTaskDriven(ensemble=ensemble, centered=True)
-        if layer == 'neurons':
-            neurons = list(range(394))
-        else:
-            neurons = list(range(1024))
-        model_name = "V4ColorTaskDriven"
-    else:
-        model = V1GrayTaskDriven(ensemble=ensemble, centered=True)
-        if layer == 'neurons':
-            neurons = list(range(458))
-        else:
-            neurons = list(range(1024))
-        model_name = "V1GrayTaskDriven"
-
-    model = model.eval().to(device)
-
     package_dir = Path(dualneuron.__file__).parent
-    mask_path = package_dir / "twins" / model_name / "mask.npy"
+    mask_path = package_dir / "twins" / "V4ColorTaskDriven" / "mask.npy"
     mask = np.load(mask_path)
-       
+    
+    if model == 'v1':
+        output_size = (93, 93)
+        norm = 12.0
+        num_channels = 1
+    elif model == 'v4':
+        output_size = (100, 100)
+        norm = 40.0
+        num_channels = 3
+    else:
+        output_size = (224, 224)
+        norm = 80.0
+        num_channels = 3
+    
     if dataset == "rendered":    
         dset = RenderedImages(
             data_dir=data_dir,
             use_center_crop=True,
             use_resize_output=True,
-            use_grayscale=False if area == 'v4' else True,
+            use_grayscale=True if model == 'v1' else False,
             use_normalize=True,
             use_mask=True,
             use_norm=True,
             use_clip=False,
             mask=mask,
-            num_channels=3 if area == 'v4' else 1,
-            output_size=(100, 100) if area == 'v4' else (93, 93),
-            crop_size=236 if area == 'v4' else 167,
+            num_channels=1 if model == 'v1' else 3,
+            output_size=output_size,
+            crop_size=167 if model == 'v1' else 236,
             bg_value=0.0,
-            norm=40.0 if area == 'v4' else 12.0
+            norm=norm
         )
     else:
         dset = ImagenetImages(
@@ -81,17 +87,17 @@ def activations(
             split=split,
             use_center_crop=True,
             use_resize_output=True,
-            use_grayscale=False if area == 'v4' else True,
+            use_grayscale=True if model == 'v1' else False,
             use_normalize=True,
             use_mask=True,
             use_norm=True,
             use_clip=False,
             mask=mask,
-            num_channels=3 if area == 'v4' else 1,
-            output_size=(100, 100) if area == 'v4' else (93, 93),
-            crop_size=236 if area == 'v4' else 167,
+            num_channels=1 if model == 'v1' else 3,
+            output_size=output_size,
+            crop_size=167 if model == 'v1' else 236,
             bg_value=0.0,
-            norm=40.0 if area == 'v4' else 12.0,
+            norm=norm,
         )
     
     loader = DataLoader(
@@ -102,16 +108,24 @@ def activations(
         pin_memory=True
     )
     
+    output_shape, neurons = get_layer_info(
+        function, 
+        (1, num_channels, *output_size), 
+        device=device
+    )
+    neurons = list(range(neurons))
+    
     bsize = loader.batch_size
     outs = torch.zeros(len(loader.dataset), len(neurons))
     
     with torch.no_grad():
         for i, (scenes, _) in tqdm(enumerate(loader), total=len(loader)):
-            if layer == 'features':
-                output = model.core.features(scenes.cuda())[:, neurons, 3, 3]
-            else:
-                output = model(scenes.cuda())[:, neurons]
-
+            output = function(scenes.to(device))
+            output = get_spatial_activation(
+                output, 
+                neurons=neurons, 
+                location=location
+            )
             outs[i*bsize:i*bsize+len(scenes)] = output.cpu().detach()
 
     resps, idx = torch.sort(outs, dim=0)
@@ -121,8 +135,14 @@ def activations(
     if output_dir is None:
         return sresps, sidx
     else:
-        endrespdir = os.path.join(output_dir, f"{area}_{layer}_{dataset}_ordered_responses")
-        idxdir = os.path.join(output_dir, f"{area}_{layer}_{dataset}_ordered_indices")
+        endrespdir = os.path.join(
+            output_dir, 
+            f"{model}_{layer}_{dataset}_ordered_responses"
+        )
+        idxdir = os.path.join(
+            output_dir, 
+            f"{model}_{layer}_{dataset}_ordered_indices"
+        )
 
         os.makedirs(endrespdir, exist_ok=True)
         os.makedirs(idxdir, exist_ok=True)
@@ -141,14 +161,17 @@ if __name__ == "__main__":
     parser.add_argument("--token", type=str, default=None, help="Huggingface token for imagenet")
     parser.add_argument("--split", type=str, default="train", help="train, validation, or test")
     parser.add_argument("--dataset", type=str, help="rendered or imagenet")
-    parser.add_argument("--area", type=str, default="v4", help="area: v4 or v1")
-    parser.add_argument("--layer", type=str, default="neurons", help="neurons or features")
+    parser.add_argument("--model", type=str, default="v4", help="model architecture")
+    parser.add_argument("--layer", type=str, default=None, help="layer name, if none use final layer")
+    parser.add_argument("--location", default="center", help="spatial location for activation extraction")
     parser.add_argument("--ensemble", type=bool, default=True, help="use ensemble model")
     parser.add_argument("--batch_size", type=int, default=32, help="batch size for dataloader")
     parser.add_argument("--num_workers", type=int, default=0, help="number of workers for dataloader")
+    parser.add_argument("--device", type=str, default="cuda", help="device to run on")
     args = parser.parse_args()
     
-    activations(
+    screen_activations(
         args.data_dir, args.output_dir, args.token, args.split, args.dataset, 
-        args.area, args.layer, args.ensemble, args.batch_size, args.num_workers
+        args.model, args.layer, args.location, args.ensemble, args.batch_size, 
+        args.num_workers, args.device
     )
