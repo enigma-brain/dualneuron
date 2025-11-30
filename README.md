@@ -51,29 +51,29 @@ Each model uses **ensemble averaging** (5-10 models) for robust predictions and 
 
 **Requirements:** Python ≥3.10
 
-\`\`\`bash
+```bash
 # Create virtual environment
 python3.10 -m venv .venv
 source .venv/bin/activate
 
 # Install package
 pip install -e .
-\`\`\`
+```
 
 ## Configuration
 
-Create a \`.env\` file for credentials:
+Create a `.env` file for credentials:
 
-\`\`\`bash
+```bash
 HF_TOKEN=your_huggingface_token  # Required for ImageNet access
 DATA_DIR=/path/to/data           # Optional: default data directory
-\`\`\`
+```
 
 ## Usage
 
 ### Loading Digital Twin Models
 
-\`\`\`python
+```python
 from dualneuron.twins.nets import V4ColorTaskDriven, V1GrayTaskDriven, load_model
 
 # Load V4 color model (ensemble of 5 models)
@@ -90,13 +90,13 @@ model = load_model(
     centered=True,          # Center readout for MEI synthesis
     device='cuda'
 )
-\`\`\`
+```
 
 ### Screening Large Image Datasets
 
 Identify which natural images most/least activate each neuron:
 
-\`\`\`python
+```python
 from dualneuron.screening.run import screen_activations
 
 # Screen ImageNet to find MAIs/LAIs
@@ -112,13 +112,13 @@ sorted_responses, sorted_indices = screen_activations(
 
 # sorted_indices[:, neuron_id][:10]  → LAIs (lowest 10)
 # sorted_indices[:, neuron_id][-10:] → MAIs (highest 10)
-\`\`\`
+```
 
 ### Synthesizing MEIs and LEIs
 
 Generate optimal stimuli via gradient ascent:
 
-\`\`\`python
+```python
 from dualneuron.synthesis.ascend import fourier_ascending, pixel_ascending
 
 # For V4 (color): Fourier-parameterized synthesis with natural priors
@@ -147,13 +147,13 @@ result = pixel_ascending(
 mei = result['image']           # Synthesized image
 alpha = result['alpha']         # Saliency/transparency map
 activation = result['activation']  # Final activation value
-\`\`\`
+```
 
 ### Batch Generation of MEIs/LEIs
 
 Generate MEIs and LEIs for all neurons:
 
-\`\`\`python
+```python
 from dualneuron.synthesis.generate import generate_poles
 
 # Generate both poles for V1 and V4 neurons
@@ -163,13 +163,13 @@ generate_poles(
     v1_neurons=458,       # Number of V1 neurons (or list of IDs)
     v4_neurons=394        # Number of V4 neurons (or list of IDs)
 )
-\`\`\`
+```
 
 ### Semantic Analysis with DreamSim
 
 Compute semantic axes between activation poles:
 
-\`\`\`python
+```python
 from dualneuron.dream.axis import semantic_axis
 from dualneuron.dream.sim import embeddings
 from dreamsim import dreamsim
@@ -192,11 +192,11 @@ result = fourier_ascending(
     simulation_weight=0.5,  # Weight for semantic guidance
     ...
 )
-\`\`\`
+```
 
 ### Visualization
 
-\`\`\`python
+```python
 from dualneuron.synthesis.visualize import plot_poles, blend, sequence_animation
 from dualneuron.screening.visualize import plot_neuron_activation, plot_neuron_poles
 
@@ -218,11 +218,11 @@ animation = sequence_animation(
 
 # Plot sorted activation curve for a neuron
 plot_neuron_activation(neuron_id=42, resp_dir="responses/", response_stats=stats)
-\`\`\`
+```
 
 ## Package Structure
 
-\`\`\`
+```
 dualneuron/
 ├── twins/                  # Digital twin neural predictive models
 │   ├── nets.py            # Model loaders (V1GrayTaskDriven, V4ColorTaskDriven, etc.)
@@ -249,7 +249,7 @@ dualneuron/
 └── dream/                  # Semantic embedding analysis
     ├── axis.py            # Semantic axis computation
     └── sim.py             # DreamSim embedding extraction
-\`\`\`
+```
 
 ## Data Availability
 
@@ -267,7 +267,7 @@ This includes:
 
 If you use this code, please cite our paper:
 
-\`\`\`bibtex
+```bibtex
 @article{franke2025dual,
   title={Dual-feature selectivity enables bidirectional coding in visual cortical neurons},
   author={Franke, Katrin and Karantzas, Nikolaos and others},
@@ -275,7 +275,7 @@ If you use this code, please cite our paper:
   year={2025},
   doi={10.1101/2025.07.16.665209}
 }
-\`\`\`
+```
 
 ## License
 
