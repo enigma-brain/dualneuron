@@ -8,6 +8,23 @@ import torch
 
 
 def gini(x):
+    """
+    Compute the Gini coefficient of a numpy array as a sparsity measure.
+    
+    In the context of neural responses, the Gini coefficient quantifies how
+    selective a neuron is. A high value indicates the neuron responds strongly
+    to only a few stimuli (sparse coding), while a low value indicates more
+    uniform responses across stimuli.
+    
+    Args:
+        x (np.ndarray): 1D array of non-negative values, assumed to be sorted
+            in ascending order (e.g., sorted neuron activations).
+    
+    Returns:
+        float: Gini coefficient between 0 and 1. Returns 0.0 if sum of x is zero.
+            - 0: Uniform responses (non-selective)
+            - 1: Maximally sparse (responds to one stimulus only)
+    """
     n = len(x)
     if np.sum(x) == 0: return 0.0
     index = np.arange(1, n + 1)
@@ -19,12 +36,26 @@ def compute_population_statistics(resp_dir, sort_by='gini'):
     Compute statistics for all neurons from their ordered response files.
     
     Args:
-        resp_dir: Directory containing ordered response .npy files (named 0.npy, 1.npy, etc.)
-        sort_by: Column name to sort by (default: 'gini')
+        resp_dir (str): Directory containing ordered response .npy files 
+            (named 0.npy, 1.npy, etc.)
+        sort_by (str): Column name to sort by. Options: 'gini', 'skewness', 
+            'mean', 'std', 'range', 'cv', 'max', 'q95', 'q05'. Default: 'gini'.
         
     Returns:
-        response_stats: DataFrame with statistics for each neuron
-        active_neuron_ids: List of active neuron IDs
+        tuple: (response_stats, active_neuron_ids)
+            - response_stats (pd.DataFrame): Statistics for each neuron with columns:
+                - neuron_id: Neuron identifier
+                - gini: Gini coefficient (selectivity measure)
+                - skewness: Distribution skewness
+                - mean: Mean activation
+                - std: Standard deviation
+                - range: Max - min activation
+                - cv: Coefficient of variation (std/mean)
+                - max: Maximum activation
+                - q95: 95th percentile
+                - q05: 5th percentile
+            - active_neuron_ids (list): Neuron IDs that pass activity thresholds
+                (max > 0.5, mean > 0.01, std > 0).
     """
     
     response_stats = []

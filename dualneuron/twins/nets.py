@@ -1,3 +1,16 @@
+"""
+Neural network model loaders for visual cortex digital twins.
+
+This module provides functions to load pretrained neural predictive models
+that predict neural responses in macaque visual cortex (V1, V4). It also
+supports loading standard ImageNet-trained models for comparison.
+
+Available Models:
+    - V4ColorTaskDriven: Color V4 model (3 channels, 100x100, 394 neurons)
+    - V1GrayTaskDriven: Grayscale V1 model (1 channel, 93x93, 458 neurons)
+    - V4GrayTaskDriven: Grayscale V4 model (1 channel, 100x100, 1244 neurons)
+    - Standard torchvision models (vgg16, resnet50, vit_b_16, etc.)
+"""
 import warnings
 warnings.filterwarnings('ignore')
 import torch
@@ -19,6 +32,34 @@ def V4ColorTaskDriven(
     untrained=False,
     base_dir=os.path.dirname(os.path.abspath(__file__))
 ):
+    """
+    Load the color V4 neural predictive model.
+    
+    A ResNet50-based model trained to predict neural responses in macaque V4
+    to color natural images. Uses an L2-robust pretrained backbone with a
+    Gaussian readout for spatial pooling.
+    
+    Args:
+        ensemble (bool): If True, returns an ensemble of 5 models with
+            averaged predictions. If False, returns a single model.
+            Default: False.
+        centered (bool): If True, sets readout positions to image center,
+            removing spatial selectivity. Useful for MEI synthesis.
+            Default: False.
+        untrained (bool): If True, returns model with random weights
+            (architecture only). Default: False.
+        base_dir (str): Directory containing model weights. Default: module
+            directory.
+    
+    Returns:
+        torch.nn.Module: The V4 model (single or ensemble).
+    
+    Model Details:
+        - Input: (batch, 3, 100, 100) RGB images
+        - Output: (batch, 394) predicted firing rates
+        - Backbone: ResNet50 L2-robust (layer3.0)
+        - Normalization: mean=113.5, std=59.58
+    """
     
     model_fn = 'nnvision.models.ptrmodels.task_core_gauss_readout'
     model_config = {
@@ -59,7 +100,7 @@ def V4ColorTaskDriven(
         'c0f9f75fd8743c363df3f32dfbf88a7f.pth.tar'
     ]
     
-    models = []
+    models_list = []
     for i, f in enumerate(ensemble_names):
         filename = os.path.join(base_dir, 'V4ColorTaskDriven', f)
         state_dict = torch.load(filename, map_location='cpu')
@@ -74,11 +115,11 @@ def V4ColorTaskDriven(
         if centered:
             model.readout['all_sessions'].mu.data.fill_(0)
 
-        models.append(model)
+        models_list.append(model)
         if not ensemble and i==0: break
     
     if ensemble:
-        model = EnsembleModel(*models)
+        model = EnsembleModel(*models_list)
         
     return model
 
@@ -89,6 +130,34 @@ def V1GrayTaskDriven(
     untrained=False,
     base_dir=os.path.dirname(os.path.abspath(__file__))
 ):
+    """
+    Load the grayscale V1 neural predictive model.
+    
+    A ConvNeXt-based model trained to predict neural responses in macaque V1
+    to grayscale natural images. Uses a ConvNeXtV2-Atto backbone with a
+    Gaussian readout.
+    
+    Args:
+        ensemble (bool): If True, returns an ensemble of 5 models with
+            averaged predictions. If False, returns a single model.
+            Default: False.
+        centered (bool): If True, sets readout positions to image center,
+            removing spatial selectivity. Useful for MEI synthesis.
+            Default: False.
+        untrained (bool): If True, returns model with random weights
+            for both backbone and readout. Default: False.
+        base_dir (str): Directory containing model weights. Default: module
+            directory.
+    
+    Returns:
+        torch.nn.Module: The V1 model (single or ensemble).
+    
+    Model Details:
+        - Input: (batch, 1, 93, 93) grayscale images
+        - Output: (batch, 458) predicted firing rates
+        - Backbone: ConvNeXtV2-Atto (encoder.stages.1.layers.0)
+        - Normalization: mean=124.54, std=70.28
+    """
 
     model_fn = 'nnvision.models.ptrmodels.convnext_core_gauss_readout'
     model_config =  {
@@ -120,7 +189,7 @@ def V1GrayTaskDriven(
         'v1_convnext_5.pth.tar',
     ]
     
-    models = []
+    models_list = []
     for i, f in enumerate(ensemble_names):
         torch.manual_seed(i)
         filename = os.path.join(base_dir, 'V1GrayTaskDriven', f)
@@ -142,11 +211,11 @@ def V1GrayTaskDriven(
             like = model.readout[dk].features.data
             model.readout[dk].features.data = torch.randn_like(like)
             
-        models.append(model)
+        models_list.append(model)
         if not ensemble and i==0: break
     
     if ensemble:
-        model = EnsembleModel(*models)
+        model = EnsembleModel(*models_list)
         
     return model
 
@@ -157,6 +226,38 @@ def V4GrayTaskDriven(
     untrained=False,
     base_dir=os.path.dirname(os.path.abspath(__file__))
 ):
+    """
+    Load the grayscale V4 neural predictive model.
+    
+    A ResNet50-based model trained to predict neural responses in macaque V4
+    to grayscale natural images. Similar architecture to V4ColorTaskDriven
+    but with single-channel input.
+    
+    Args:
+        ensemble (bool): If True, returns an ensemble of 10 models with
+            averaged predictions. If False, returns a single model.
+            Default: False.
+        centered (bool): If True, sets readout positions to image center,
+            removing spatial selectivity. Useful for MEI synthesis.
+            Default: False.
+        untrained (bool): If True, returns model with random weights
+            (architecture only). Default: False.
+        base_dir (str): Directory containing model weights. Default: module
+            directory.
+    
+    Returns:
+        torch.nn.Module: The V4 grayscale model (single or ensemble).
+    
+    Model Details:
+        - Input: (batch, 1, 100, 100) grayscale images
+        - Output: (batch, 1244) predicted firing rates
+        - Backbone: ResNet50 L2-robust (layer3.0)
+        - Normalization: mean=124.54, std=70.28
+    
+    Note:
+        This model has more neurons (1244) and more ensemble members (10)
+        than V4ColorTaskDriven.
+    """
     
     model_fn = 'nnvision.models.ptrmodels.task_core_gauss_readout'
     model_config = {
@@ -200,7 +301,7 @@ def V4GrayTaskDriven(
         'task_driven_ensemble_model_10.pth.tar'
     ]
 
-    models = []
+    models_list = []
     for i, f in enumerate(ensemble_names):
         torch.manual_seed(i)
         filename = os.path.join(base_dir, 'V4GrayTaskDriven', f)
@@ -217,11 +318,11 @@ def V4GrayTaskDriven(
         if centered:
             model.readout['all_sessions'].mu.data.fill_(0)
 
-        models.append(model)
+        models_list.append(model)
         if not ensemble and i==0: break
     
     if ensemble:
-        model = EnsembleModel(*models)
+        model = EnsembleModel(*models_list)
 
     return model
 
@@ -234,6 +335,43 @@ def load_model(
     untrained=False,
     device='cuda'
 ):
+    """
+    Load a neural network model for activation extraction or prediction.
+    
+    Unified interface for loading neural predictive models (V1, V4) or
+    standard ImageNet-trained models. Optionally wraps with ActivationExtractor
+    for intermediate layer access.
+    
+    Args:
+        architecture (str): Model architecture to load. Options:
+            - 'v1': V1GrayTaskDriven (grayscale, 93x93, 458 neurons)
+            - 'v4': V4ColorTaskDriven (color, 100x100, 394 neurons)
+            - 'v4g': V4GrayTaskDriven (grayscale, 100x100, 1244 neurons)
+            - 'vgg16': VGG16 pretrained on ImageNet
+            - 'vgg16_bn': VGG16 with batch normalization
+            - 'resnet50': ResNet50 pretrained on ImageNet
+            - 'vit_b_16': Vision Transformer B/16
+            Default: 'v4'.
+        layer (str, optional): Layer name to extract activations from.
+            If None, returns the full model. If specified, wraps model
+            with ActivationExtractor. Default: None.
+        ensemble (bool): For neural predictive models, whether to use
+            ensemble averaging. Ignored for ImageNet models. Default: False.
+        centered (bool): For neural predictive models, whether to center
+            readout positions. Ignored for ImageNet models. Default: True.
+        untrained (bool): If True, returns model with random weights.
+            Default: False.
+        device (str or torch.device): Device to move model to.
+            Default: 'cuda'.
+    
+    Returns:
+        torch.nn.Module or ActivationExtractor: The loaded model in eval mode.
+            If layer is specified, returns an ActivationExtractor that can
+            be called like a function.
+    
+    Raises:
+        AssertionError: If architecture is not recognized.
+    """
     assert architecture in [
         'v4', 'v1', 'v4g',
         'vgg16', 
@@ -261,7 +399,7 @@ def load_model(
         )
     else:
         if untrained:
-            model = models.__dict__[architecture](weights=None)
+            model = getattr(models, architecture)(weights=None)
         else:
             model = getattr(models, architecture)(weights='IMAGENET1K_V1')
 
@@ -271,8 +409,28 @@ def load_model(
     return model
 
 
-def model_summary(model, input_size=(1, 3, 100, 100), device='cuda'):
-    model = load_model(architecture=model, device=device)
+def model_summary(architecture, input_size=(1, 3, 100, 100), device='cuda'):
+    """
+    Print a summary of all layers and their activation shapes.
+    
+    Runs a forward pass with dummy input and captures activations from
+    all layers, printing their names, shapes, and unit counts.
+    
+    Args:
+        architecture (str): Model architecture name (same options as load_model).
+        input_size (tuple): Input tensor shape as (batch, channels, H, W).
+            Default: (1, 3, 100, 100).
+        device (str or torch.device): Device to run on. Default: 'cuda'.
+    
+    Returns:
+        tuple: (model, activations)
+            - model (torch.nn.Module): The loaded model.
+            - activations (dict): Mapping from layer names to activation tensors.
+    
+    Note:
+        Useful for exploring layer names to use with load_model(layer=...).
+    """
+    model = load_model(architecture=architecture, device=device)
     dummy_input = torch.randn(input_size).to(next(model.parameters()).device)
     extractor = ActivationExtractor(model)
     activations = extractor.get_all_activations(dummy_input)

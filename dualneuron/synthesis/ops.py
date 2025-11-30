@@ -1,18 +1,28 @@
 import torch
 import torch.nn.functional as F
-from torchvision.transforms.functional import gaussian_blur
 from torchvision.ops import roi_align
 from functools import lru_cache
 
 
-def standardize(tensor):
-    tensor = tensor - torch.mean(tensor)
-    tensor = tensor / (torch.std(tensor) + 1e-4)
-    return tensor
-
-
 @lru_cache(maxsize=8)
 def color_correlation(device):
+    """
+    Get the color correlation matrix for natural images.
+    
+    Returns a cached matrix that transforms decorrelated color channels
+    into correlated RGB channels matching natural image statistics.
+    This is the inverse of a color decorrelation transform.
+    
+    Args:
+        device (str or torch.device): Device to place the matrix on.
+    
+    Returns:
+        torch.Tensor: 3x3 color correlation matrix.
+    
+    Note:
+        Results are cached per device to avoid redundant tensor creation.
+        The matrix is derived from ImageNet color statistics.
+    """
     return torch.tensor(
         [[0.56282854, 0.58447580, 0.58447580],
          [0.19482528, 0.00000000, -0.19482528],
@@ -23,6 +33,23 @@ def color_correlation(device):
 
 
 def recorrelate_colors(image, device):
+    """
+    Apply color correlation to produce naturalistic RGB values.
+    
+    Transforms an image from a decorrelated color space back to RGB
+    with correlations matching natural images. Used in Fourier-based
+    image synthesis to produce more realistic colors.
+    
+    Args:
+        image (torch.Tensor): Input image, shape (3, H, W).
+        device (str or torch.device): Device for the correlation matrix.
+    
+    Returns:
+        torch.Tensor: Color-correlated image, shape (3, H, W).
+    
+    Raises:
+        AssertionError: If image is not 3-dimensional.
+    """
     assert len(image.shape) == 3
     correlation = color_correlation(device)
     permuted_image = image.permute(1, 2, 0).contiguous()
@@ -38,6 +65,36 @@ def create_crops(
     oversample=2,
     reflect_pad_frac=0.05
 ):
+    """
+    Create random crops of an image for robust activation maximization.
+    
+    Generates multiple randomly positioned and scaled crops centered around
+    the image center with jitter. Uses reflection padding to handle edge
+    cases and oversampling for antialiasing.
+    
+    Args:
+        image (torch.Tensor): Input image, shape (C, H, W).
+        nb_crops (int): Number of crops to generate.
+        box_size (tuple): (min_scale, max_scale) as fractions of image size.
+            For example, (0.2, 0.25) means crops are 20-25% of the image.
+        input_size (int): Output size for each crop (square).
+        jitter_std (float): Standard deviation for center position jitter,
+            as a fraction of image size. Default: 0.03.
+        oversample (int): Factor to oversample crops before downscaling,
+            improves antialiasing quality. Default: 2.
+        reflect_pad_frac (float): Fraction of image size to pad with
+            reflection on each side. Default: 0.05.
+    
+    Returns:
+        torch.Tensor: Batch of crops, shape (nb_crops, C, input_size, input_size).
+    
+    Raises:
+        AssertionError: If image is not 3-dimensional.
+    
+    Note:
+        Crop centers are sampled from N(0.5, jitter_std) in normalized
+        coordinates, so most crops are near the image center.
+    """
     assert image.ndim == 3
     device = image.device
     C, H, W = image.shape
@@ -91,12 +148,46 @@ def create_crops(
 
 
 def add_noise(image, noise_level):
+    """
+    Add Gaussian noise to an image.
+    
+    Used during optimization to improve robustness and prevent
+    overfitting to high-frequency artifacts.
+    
+    Args:
+        image (torch.Tensor): Input image, any shape.
+        noise_level (float): Standard deviation of Gaussian noise to add.
+    
+    Returns:
+        torch.Tensor: Noisy image with same shape as input.
+    
+    Note:
+        Creates a clone of the input, so the original tensor is not modified.
+    """
     noisy = image.clone()
     noisy.add_(torch.randn_like(noisy) * noise_level)
     return noisy
 
 
 def change_norm(image, target_norm):
+    """
+    Rescale image(s) to have a specific L2 norm.
+    
+    Useful for controlling the overall magnitude of synthesized images
+    to match the statistics of training data.
+    
+    Args:
+        image (torch.Tensor): Input image, shape (C, H, W) or (N, C, H, W).
+        target_norm (float or None): Desired L2 norm. If None, returns
+            the image unchanged.
+    
+    Returns:
+        torch.Tensor: Rescaled image with L2 norm ≈ target_norm.
+    
+    Note:
+        For batched inputs (4D), each image in the batch is independently
+        rescaled to have the target norm.
+    """
     if target_norm is None:
         return image
     eps = 1e-8

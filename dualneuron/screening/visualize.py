@@ -6,11 +6,24 @@ import matplotlib.pyplot as plt
 from glob import glob
 from dualneuron.screening.utils import sample_activations_adaptively
 
+import base64
+from io import BytesIO
+from PIL import Image
+import json
+import torch
+
 
 def plot_population_statistics(response_stats, figsize=(12, 8)):
     """
     Plot histograms of key neuron statistics.
-    Args: response_stats: List of dicts with neuron statistics
+    
+    Displays six histograms showing the distribution of selectivity and activity
+    metrics across the neuron population, with median lines for each metric.
+    
+    Args:
+        response_stats (pd.DataFrame): DataFrame from compute_population_statistics()
+            containing columns: 'gini', 'max', 'mean', 'cv', 'skewness', 'q95'.
+        figsize (tuple): Figure size as (width, height). Default: (12, 8).
     """
     
     metrics = {
@@ -75,7 +88,25 @@ def plot_population_statistics(response_stats, figsize=(12, 8)):
     plt.show()
 
 
-def plot_neuron_activation(neuron_id, resp_dir, response_stats, figsize=(5, 5)):
+def plot_neuron_activation(
+    neuron_id, 
+    resp_dir, 
+    response_stats, 
+    figsize=(5, 5)
+):
+    """
+    Plot the sorted activation curve for a single neuron.
+    
+    Displays the neuron's responses to all images sorted by activation value,
+    with a horizontal line indicating the mean response.
+    
+    Args:
+        neuron_id (int): ID of the neuron to plot.
+        resp_dir (str): Directory containing ordered response .npy files.
+        response_stats (pd.DataFrame): DataFrame from compute_population_statistics()
+            containing statistics for each neuron.
+        figsize (tuple): Figure size as (width, height). Default: (5, 5).
+    """
     unit_responses = np.load(os.path.join(resp_dir, f"{neuron_id}.npy"))
     nstats = response_stats[response_stats['neuron_id'] == neuron_id].iloc[0]
     fig, ax = plt.subplots(figsize=figsize, facecolor='black')
@@ -124,12 +155,20 @@ def plot_neuron_poles(
     """
     Plot the lowest, first-positive, and highest activating images for a neuron.
     
+    Displays a 3x10 grid showing:
+        - Row 1: 10 lowest activating images (most suppressive)
+        - Row 2: First 10 images with positive activation
+        - Row 3: 10 highest activating images (most excitatory)
+    
     Args:
-        neuron_id: ID of the neuron
-        resp_dir: Directory with ordered responses
-        idx_dir: Directory with ordered indices
-        figsize: Figure size
-        vmin, vmax: Color scale limits for images
+        neuron_id (int): ID of the neuron to visualize.
+        dset: Dataset object (ImagenetImages or RenderedImages) with __getitem__
+            method that returns (tensor, label) tuples.
+        resp_dir (str): Directory containing ordered response .npy files.
+        idx_dir (str): Directory containing ordered index .npy files.
+        figsize (tuple): Figure size as (width, height). Default: (16, 6).
+        vmin (float, optional): Minimum value for image color scaling.
+        vmax (float, optional): Maximum value for image color scaling.
     """
     # Load ordered responses and indices
     responses = np.load(os.path.join(resp_dir, f"{neuron_id}.npy"))
@@ -213,8 +252,18 @@ def plot_neuron_poles(
     
     
 def visualize_adaptive_sampling(responses, num_samples=100, figsize=(5, 5)):
-    """Visualize which points were sampled along the activation curve."""
+    """
+    Visualize which points were sampled along the activation curve.
     
+    Shows the full sorted activation curve with highlighted points indicating
+    where adaptive sampling selected images (denser sampling where the curve
+    changes rapidly).
+    
+    Args:
+        responses (np.ndarray): 1D array of activation values for all images.
+        num_samples (int): Number of points to sample. Default: 100.
+        figsize (tuple): Figure size as (width, height). Default: (5, 5).
+    """
     sampled_idx, sorted_responses, sampled_positions = sample_activations_adaptively(
         responses, num_samples
     )

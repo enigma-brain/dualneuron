@@ -11,6 +11,15 @@ rc('animation', html='jshtml')
 
 
 def check_format(arr):
+    """
+    Convert tensor to numpy and ensure HWC format.
+    
+    Args:
+        arr (torch.Tensor or np.ndarray): Image in any format.
+    
+    Returns:
+        np.ndarray: Image in HWC format (height, width, channels).
+    """
     if isinstance(arr, torch.Tensor):
         arr = arr.detach().cpu().numpy()
     if arr.ndim == 3 and arr.shape[0] in [1, 3]:
@@ -19,6 +28,20 @@ def check_format(arr):
 
 
 def clip_percentile(img, percentile=0.1):
+    """
+    Clip image values to a percentile range.
+    
+    Removes extreme outliers by clipping to the specified percentile
+    from both ends of the distribution.
+    
+    Args:
+        img (np.ndarray): Input image.
+        percentile (float): Percentile to clip from each end. For example,
+            0.1 clips to the [0.1, 99.9] percentile range. Default: 0.1.
+    
+    Returns:
+        np.ndarray: Clipped image.
+    """
     clipped = np.clip(
         img, np.percentile(img, percentile),
         np.percentile(img, 100 - percentile)
@@ -27,6 +50,24 @@ def clip_percentile(img, percentile=0.1):
 
 
 def denormalize(image, mean=0.45, std=0.25, boost=1.0):
+    """
+    Denormalize an image from standard normalization to [0, 1] range.
+    
+    Reverses the normalization typically applied before neural network
+    input: x_normalized = (x - mean) / std.
+    
+    Args:
+        image (np.ndarray): Normalized image.
+        mean (float or None): Mean used in normalization. If None, uses
+            min-max scaling instead. Default: 0.45.
+        std (float or None): Standard deviation used in normalization.
+            If None, uses min-max scaling instead. Default: 0.25.
+        boost (float): Multiplier for std to increase contrast. Values > 1
+            increase saturation/contrast. Default: 1.0.
+    
+    Returns:
+        np.ndarray: Denormalized image clipped to [0, 1].
+    """
     if mean is None or std is None:
         image = (image - image.min()) / (image.max() + 1e-8)
     else:
@@ -37,8 +78,31 @@ def denormalize(image, mean=0.45, std=0.25, boost=1.0):
 def blend(
     image, alpha, 
     imagecut=0.0, alphacut=90, 
-    mean=0.45, std=0.25, boost=1.0
+    mean=0.45, std=0.25, boost=1.0,
+    bg_value=0.0, 
 ):
+    """
+    Blend an image with a gray background using an alpha mask.
+    
+    Creates a visualization where salient regions (high alpha) show the
+    original image and non-salient regions fade to gray. Useful for
+    visualizing which parts of a synthesized image drive neural activation.
+    
+    Args:
+        image (torch.Tensor or np.ndarray): Input image, shape (C, H, W)
+            or (H, W, C).
+        alpha (torch.Tensor or np.ndarray): Transparency/saliency mask,
+            shape (C, H, W) or (H, W, C). Averaged across channels.
+        imagecut (float): Percentile for clipping image values. Default: 0.0.
+        alphacut (float): Upper percentile for clipping alpha values.
+            Prevents very high saliency values from dominating. Default: 90.
+        mean (float): Mean for denormalization. Default: 0.45.
+        std (float): Std for denormalization. Default: 0.25.
+        boost (float): Contrast boost factor. Default: 1.0.
+    
+    Returns:
+        np.ndarray: Blended image in [0, 1] range, shape (H, W, C).
+    """
     image, alpha = check_format(image), check_format(alpha)
 
     image = clip_percentile(image, imagecut)
@@ -52,12 +116,28 @@ def blend(
     if is_rgb:
         alpha = np.repeat(alpha, 3, axis=-1)
 
-    gray_background = np.ones_like(image) * mean
-    blended = image * alpha + gray_background * (1 - alpha)
+    background = np.ones_like(image) * bg_value
+    blended = image * alpha + background * (1 - alpha)
     return blended
 
 
 def plot_poles(images, activations, vmin=0.1, vmax=0.8):
+    """
+    Plot two synthesized images with their optimization activation curves.
+    
+    Displays a 2x2 grid with activation curves on top and corresponding
+    images below. Intended for comparing low-pole and high-pole MEIs.
+    
+    Args:
+        images (list): Two images to display, each as np.ndarray or tensor.
+        activations (list): Two lists of activation values from optimization,
+            one per image.
+        vmin (float): Minimum value for grayscale colormap. Default: 0.1.
+        vmax (float): Maximum value for grayscale colormap. Default: 0.8.
+    
+    Returns:
+        None: Displays the plot using plt.show().
+    """
     fig, axs = plt.subplots(2, 2, figsize=(5, 5), facecolor='black')
     fig.subplots_adjust(hspace=0.3, wspace=0.3)
 
@@ -85,32 +165,66 @@ def plot_poles(images, activations, vmin=0.1, vmax=0.8):
 
 
 def plot_group(images, cols=5, vmin=0.1, vmax=0.8):
+    """
+    Plot a grid of images.
+    
+    Args:
+        images (list): List of images to display.
+        cols (int): Number of columns in the grid. Default: 5.
+        vmin (float): Minimum value for grayscale colormap. Default: 0.1.
+        vmax (float): Maximum value for grayscale colormap. Default: 0.8.
+    
+    Returns:
+        None: Displays the plot using plt.show().
+    """
     nrows = len(images) // cols if len(images) % cols == 0 else len(images) // cols + 1
     ncols = cols if len(images) >= cols else len(images)
 
     fig, axs = plt.subplots(
         nrows, ncols, 
         figsize=(2*ncols, 2*nrows), 
-        facecolor='black'
+        facecolor='black',
+        squeeze=False
     )
     fig.subplots_adjust(hspace=0.1, wspace=0.1)
     axs = axs.ravel()
 
+    # Hide all axes first
+    for ax in axs:
+        ax.axis('off')
+
+    # Then show images
     for ax, img in zip(axs, images):
         ax.imshow(
             img, cmap='gray', 
             vmin=vmin, vmax=vmax
         )
-        ax.axis('off')
 
     plt.tight_layout()
     plt.show()
     
     
 def estimate_mask(mei, zscore_thresh=0.5):
+    """
+    Estimate a receptive field mask from a synthesized MEI.
+    
+    Identifies salient regions by z-score thresholding, morphological
+    operations, and convex hull extraction. Useful for estimating the
+    spatial extent of a neuron's receptive field.
+    
+    Args:
+        mei (np.ndarray): Most exciting image, shape (H, W) or (H, W, C).
+        zscore_thresh (float): Z-score threshold for initial segmentation.
+            Pixels with |z| > threshold are considered salient. Default: 0.5.
+    
+    Returns:
+        np.ndarray: Soft mask in [0, 1] range, shape (H, W).
+    
+    Note:
+        Requires scipy and skimage packages.
+    """
     from scipy import ndimage
     from skimage import morphology
-    import cv2
     
     params = {
         'mask_params': 1,
@@ -146,6 +260,23 @@ def estimate_mask(mei, zscore_thresh=0.5):
 
 
 def get_mean_mask(poles, zthreshold=1.0):
+    """
+    Compute average receptive field mask from multiple MEIs.
+    
+    Estimates individual masks from each image and averages them to
+    get a robust estimate of the neuron's receptive field location.
+    
+    Args:
+        poles (list): List of MEI images, each shape (H, W) or (H, W, C).
+        zthreshold (float): Z-score threshold for mask estimation.
+            Default: 1.0.
+    
+    Returns:
+        np.ndarray: Averaged and smoothed mask, shape (H, W), values in [0, 1].
+    
+    Note:
+        The final mask is binarized at threshold 0.1 before Gaussian smoothing.
+    """
     masks = []
 
     for i in range(len(poles)):
@@ -176,18 +307,36 @@ def sequence_animation(
     title="Optimization Progress"
 ):
     """
-    Create animation for a single sequence of images with activation evolution.
-    Uses the cyan/magenta aesthetic from plot_neuron_poles.
+    Create animation showing image synthesis optimization progress.
+    
+    Displays a side-by-side view of the evolving image and activation
+    curve, with the current position highlighted. Useful for visualizing
+    how activation maximization progresses over optimization steps.
     
     Args:
-        imgs: List/array of images in CHW or HWC format
-        activities: List/array of activation values
-        savename: Path to save animation (None for HTML display)
-        dpi: Resolution
-        interval: Frame interval in ms
-        title: Main title for the animation
-    """
+        imgs (list): List of images at each optimization step.
+            Each image can be torch.Tensor or np.ndarray in CHW or HWC format.
+        activities (list): Activation values at each step. Must have
+            same length as imgs.
+        savename (str, optional): Path to save animation as MP4. If None,
+            returns an HTML animation for Jupyter display. Default: None.
+        dpi (int): Resolution of the output. Default: 100.
+        interval (int): Time between frames in milliseconds. Default: 80.
+        title (str): Title displayed above the animation.
+            Default: "Optimization Progress".
     
+    Returns:
+        IPython.display.HTML or None: If savename is None, returns HTML
+            animation for Jupyter notebook display. Otherwise, saves to
+            file and returns None.
+    
+    Raises:
+        AssertionError: If imgs and activities have different lengths.
+    
+    Note:
+        Requires FFmpeg for saving to MP4. Colors indicate activation sign:
+        cyan (#00d4ff) for positive, magenta (#ff0080) for negative.
+    """
     num_frames = len(imgs)
     assert len(activities) == num_frames, "Images and activities must have same length"
     

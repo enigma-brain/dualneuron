@@ -39,18 +39,26 @@ def embeddings(
     Args:
         data_dir: Path to data directory
         cache_dir: Path to cache directory for models
+        output_path: If provided, path to save embeddings .npy file
         token: HuggingFace token for ImageNet (if needed)
         split: Dataset split ('train', 'validation', 'test')
         dataset: 'rendered' or 'imagenet'
+        area: 'v1' or 'v4' mask to use
+        use_grayscale: Whether to convert images to grayscale
+        use_mask: Whether to apply mask to images
+        use_norm: Whether to control norm of images
+        norm: Norm value if use_norm is True
+        num_channels: Number of image channels (1 or 3)
+        crop_size: Crop size for images
         bg_value: Background value for masked regions (0.0 = black)
         batch_size: Batch size for dataloader
         num_workers: Number of workers for dataloader
     
     Returns:
-        embeddings: numpy array of shape (n_images, embedding_dim)
-        indices: numpy array of image indices or paths
+        embeddings: numpy array of shape (n_images, embedding_dim) if output_path is None
     """
     assert dataset in ['rendered', 'imagenet']
+    assert area in ['v1', 'v4']
     
     # Load DreamSim model
     model, _ = dreamsim(
@@ -60,7 +68,7 @@ def embeddings(
     )
     model = model.eval()
     
-    # Load mask the same way as your V1/V4 code
+    # Load mask
     package_dir = Path(dualneuron.__file__).parent
     model_name = "V4ColorTaskDriven" if area == 'v4' else "V1GrayTaskDriven"
     mask_path = package_dir / "twins" / model_name / "mask.npy"
@@ -154,8 +162,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     embeddings_array = embeddings(
-        args.data_dir, args.cache_dir, args.output_path, args.token, args.split, args.dataset,
-        args.area, args.use_grayscale, args.use_mask, args.use_norm, args.norm,
-        args.num_channels, args.crop_size, args.bg_value, args.batch_size, args.num_workers
+        args.data_dir, args.cache_dir, 
+        args.output_path, args.token, 
+        args.split, args.dataset,
+        args.area, args.use_grayscale, 
+        args.use_mask, args.use_norm, 
+        args.norm, args.num_channels, 
+        args.crop_size, args.bg_value, 
+        args.batch_size, args.num_workers
     )
     

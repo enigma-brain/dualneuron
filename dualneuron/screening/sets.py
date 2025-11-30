@@ -40,6 +40,88 @@ class MaskTransform:
         return tensor
 
 
+class CropToMask:
+    """
+    Crop tensor to the bounding box of a mask and scale up to fill output size.
+    Works on tensors (apply after ToTensor and MaskTransform).
+    
+    Automatically resizes the mask to match tensor dimensions before computing bbox.
+    """
+    def __init__(self, mask, output_size=(224, 224), padding_frac=0.0):
+        """
+        Args:
+            mask: 2D numpy array, non-zero where content should be kept
+            output_size: Target (H, W) after scaling - image will fill this entirely
+            padding_frac: Fraction of bbox size to add as padding (default 0.0)
+        """
+        self.mask = mask
+        self.output_size = output_size
+        self.padding_frac = padding_frac
+        self.bbox_cache = {}  # Cache bbox for different tensor sizes
+    
+    def _compute_bbox(self, mask, tensor_h, tensor_w):
+        """Compute bounding box, resizing mask to match tensor if needed."""
+        if mask.shape != (tensor_h, tensor_w):
+            mask = cv2.resize(
+                mask.astype(np.float32), 
+                (tensor_w, tensor_h),
+                interpolation=cv2.INTER_LINEAR
+            )
+        
+        # Threshold to find mask region
+        binary = (mask > mask.min() + 0.01 * (mask.max() - mask.min()))
+        
+        rows = np.any(binary, axis=1)
+        cols = np.any(binary, axis=0)
+        
+        if not rows.any() or not cols.any():
+            return (0, tensor_h, 0, tensor_w)
+        
+        y_indices = np.where(rows)[0]
+        x_indices = np.where(cols)[0]
+        y_min, y_max = y_indices[0], y_indices[-1] + 1
+        x_min, x_max = x_indices[0], x_indices[-1] + 1
+        
+        # Add padding
+        bbox_h = y_max - y_min
+        bbox_w = x_max - x_min
+        pad_y = int(bbox_h * self.padding_frac)
+        pad_x = int(bbox_w * self.padding_frac)
+        
+        y_min = max(0, y_min - pad_y)
+        y_max = min(tensor_h, y_max + pad_y)
+        x_min = max(0, x_min - pad_x)
+        x_max = min(tensor_w, x_max + pad_x)
+        
+        return (y_min, y_max, x_min, x_max)
+    
+    def __call__(self, tensor):
+        """
+        Crop and scale tensor to fill output_size entirely.
+        """
+        _, h, w = tensor.shape
+        
+        # Cache bbox per tensor size (computed once per size)
+        if (h, w) not in self.bbox_cache:
+            self.bbox_cache[(h, w)] = self._compute_bbox(self.mask, h, w)
+            bbox = self.bbox_cache[(h, w)]
+        
+        y_min, y_max, x_min, x_max = self.bbox_cache[(h, w)]
+        
+        # Crop to bounding box
+        cropped = tensor[:, y_min:y_max, x_min:x_max]
+        
+        # Scale to fill output_size completely
+        cropped = cropped.unsqueeze(0)
+        scaled = torch.nn.functional.interpolate(
+            cropped,
+            size=self.output_size,
+            mode='bilinear',
+            align_corners=False
+        )
+        return scaled.squeeze(0)
+    
+
 class NormTransform:
     """Custom transform for normalizing a tensor"""
     def __init__(self, norm):
@@ -80,6 +162,7 @@ class ImagenetImages(Dataset):
         use_grayscale=False,
         use_normalize=False,
         use_mask=False,
+        use_crop_to_mask=False,
         use_norm=False,
         use_clip=False,
         # Transform parameters
@@ -90,6 +173,7 @@ class ImagenetImages(Dataset):
         bg_value=0.0,
         clip_min=0.0,
         clip_max=1.0,
+        crop_padding_frac=0.1,
         norm=None,
     ):
         """
@@ -105,6 +189,7 @@ class ImagenetImages(Dataset):
         - use_grayscale: Convert to grayscale
         - use_normalize: Apply ImageNet normalization
         - use_mask: Apply mask transform (requires mask parameter)
+        - use_crop_to_mask: Crop to mask bounding box and scale (requires mask parameter)
         - use_norm: Apply norm transform (requires norm parameter)
         
         Args:
@@ -116,6 +201,7 @@ class ImagenetImages(Dataset):
             use_grayscale: Whether to convert to grayscale
             use_normalize: Whether to apply normalization
             use_mask: Whether to apply mask transform
+            use_crop_to_mask: Whether to crop to mask bounding box and scale
             use_norm: Whether to apply norm transform
             mask: Mask array for MaskTransform (required if use_mask=True)
             num_channels: Number of output channels (auto-detected if None)
@@ -177,6 +263,11 @@ class ImagenetImages(Dataset):
             if mask is None:
                 raise ValueError("mask parameter required when use_mask=True")
             tlist.append(MaskTransform(mask, bg_value))
+        
+        if use_crop_to_mask:
+            if mask is None:
+                raise ValueError("mask parameter required when use_crop_to_mask=True")
+            tlist.append(CropToMask(mask, output_size, crop_padding_frac))
             
         if use_norm:
             if norm is None:
@@ -225,6 +316,7 @@ class RenderedImages(Dataset):
         use_grayscale=False,
         use_normalize=False,
         use_mask=False,
+        use_crop_to_mask=False,
         use_norm=False,
         use_clip=False,
         # Transform parameters
@@ -235,6 +327,7 @@ class RenderedImages(Dataset):
         bg_value=0.0,
         clip_min=0.0,
         clip_max=1.0,
+        crop_padding_frac=0.1,
         norm=None,
     ):
         """
@@ -248,6 +341,7 @@ class RenderedImages(Dataset):
         - use_grayscale: Convert to grayscale
         - use_normalize: Apply ImageNet normalization
         - use_mask: Apply mask transform (requires mask parameter)
+        - use_crop_to_mask: Crop to mask bounding box and scale (requires mask parameter)
         - use_norm: Apply norm transform (requires norm parameter)
         
         Args:
@@ -257,6 +351,7 @@ class RenderedImages(Dataset):
             use_grayscale: Whether to convert to grayscale
             use_normalize: Whether to apply normalization
             use_mask: Whether to apply mask transform
+            use_crop_to_mask: Whether to crop to mask bounding box and scale
             use_norm: Whether to apply norm transform
             mask: Mask array for MaskTransform (required if use_mask=True)
             num_channels: Number of output channels (auto-detected if None)
@@ -264,6 +359,7 @@ class RenderedImages(Dataset):
             crop_size: Size for center crop (default: 236)
             bg_value: Background value for mask transform (default: 0.0)
             norm: Norm value for NormTransform (required if use_norm=True)
+            crop_padding_frac: Padding fraction for CropToMask (default: 0.1)
         """
         
         png_files = sorted(glob(os.path.join(data_dir, '*.png')))
@@ -302,6 +398,11 @@ class RenderedImages(Dataset):
             if mask is None:
                 raise ValueError("mask parameter required when use_mask=True")
             tlist.append(MaskTransform(mask, bg_value))
+        
+        if use_crop_to_mask:
+            if mask is None:
+                raise ValueError("mask parameter required when use_crop_to_mask=True")
+            tlist.append(CropToMask(mask, output_size, crop_padding_frac))
             
         if use_norm:
             if norm is None:
