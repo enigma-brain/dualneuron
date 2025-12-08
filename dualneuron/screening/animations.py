@@ -456,7 +456,7 @@ def generate_html(data):
         const ctx = plotCanvas.getContext('2d');
         
         // Get global min/max for consistent color scaling
-        const globalMinY = Math.min.apply(null, DATA.curveResponses);
+        const globalMinY = 0;
         const globalMaxY = Math.max.apply(null, DATA.curveResponses);
         const globalRangeY = globalMaxY - globalMinY || 1;
         

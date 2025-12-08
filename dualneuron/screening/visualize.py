@@ -249,6 +249,223 @@ def plot_neuron_poles(
     )
     
     plt.show()
+
+
+def plot_synthesized_poles(
+    neuron_ids,
+    dset,
+    resp_dir,
+    idx_dir,
+    mask,
+    lei_path='lei_poles.npy',
+    mei_path='mei_poles.npy',
+    output_file='poles.png',
+    figsize=None,
+    vmin=None, 
+    vmax=None,
+    output_size=(224, 224),
+    crop_padding_frac=0.1,
+    add_neuron_labels=False
+):
+    """
+    Plot synthesized and screened least/most activating images for multiple neurons.
+    
+    Creates a grid with 2 rows per neuron:
+        - Row 1: 5 LEI seeds (left) and 5 MEI seeds (right) - cropped to mask and scaled
+        - Row 2: 5 least activating screened images (left) and 5 most activating screened images (right)
+    
+    Args:
+        neuron_ids (list): List of M neuron IDs to visualize.
+        dset: Dataset object with __getitem__ method that returns (tensor, label) tuples.
+        resp_dir (str): Directory containing ordered response .npy files.
+        idx_dir (str): Directory containing ordered index .npy files.
+        mask (np.ndarray): 2D mask array for cropping synthesized images.
+        lei_path (str): Path to .npy file with LEI images (shape: [M*5, C, H, W]).
+        mei_path (str): Path to .npy file with MEI images (shape: [M*5, C, H, W]).
+        figsize (tuple, optional): Figure size. Default: (10, 2*M).
+        vmin (float, optional): Minimum value for image color scaling.
+        vmax (float, optional): Maximum value for image color scaling.
+        output_size (tuple): Target size after cropping and scaling. Default: (224, 224).
+        crop_padding_frac (float): Padding fraction for mask bbox. Default: 0.1.
+        add_neuron_labels (bool): Whether to add neuron labels on the left side.
+    """
+    M = len(neuron_ids)
+    
+    # Load synthesized images
+    lei_images = np.load(lei_path)  # Shape: [M*5, C, H, W]
+    mei_images = np.load(mei_path)  # Shape: [M*5, C, H, W]
+    
+    # Create CropToMask transform for synthesized images
+    from dualneuron.screening.sets import CropToMask
+    import os
+    crop_transform = CropToMask(mask, output_size, crop_padding_frac)
+    
+    # Set default figure size
+    if figsize is None:
+        figsize = (10, 2 * M)
+    
+    # Create figure
+    fig = plt.figure(figsize=figsize, facecolor='black')
+    
+    # Create grid spec with extra space between columns 5 and 6
+    gs = fig.add_gridspec(
+        2 * M, 11,  # 11 columns to accommodate spacing
+        hspace=0.15, 
+        wspace=0.05,
+        top=0.92,  # Reduced from 0.98 to leave more space for headers
+        bottom=0.02, 
+        left=0.02, 
+        right=0.98,
+        width_ratios=[1, 1, 1, 1, 1, 0.3, 1, 1, 1, 1, 1]  # Extra space at index 5
+    )
+    
+    for neuron_idx, neuron_id in enumerate(neuron_ids):
+        base_row = neuron_idx * 2
+        
+        # Load ordered responses and indices for this neuron
+        responses = np.load(os.path.join(resp_dir, f"{neuron_id}.npy"))
+        indices = np.load(os.path.join(idx_dir, f"{neuron_id}.npy"))
+        
+        # Get lowest 5 and highest 5 screened images
+        lowest_idx = indices[:5]
+        highest_idx = indices[-10:-5]
+        
+        # Get synthesized images for this neuron (5 LEIs and 5 MEIs)
+        lei_start = neuron_idx * 5
+        mei_start = neuron_idx * 5
+        neuron_leis = lei_images[lei_start:lei_start + 5]
+        neuron_meis = mei_images[mei_start:mei_start + 5]
+        
+        # Row 1: Synthesized seeds (LEIs and MEIs) - CROPPED AND SCALED
+        for col_idx in range(5):
+            # LEI seeds (left side)
+            ax = fig.add_subplot(gs[base_row, col_idx])
+            img = neuron_leis[col_idx]
+            
+            # Convert to tensor and apply crop transform
+            img_tensor = torch.from_numpy(img).float()
+            if img_tensor.dim() == 2:  # HW -> CHW
+                img_tensor = img_tensor.unsqueeze(0)
+            elif img_tensor.shape[0] not in [1, 3]:  # HWC -> CHW
+                img_tensor = img_tensor.permute(2, 0, 1)
+            
+            # Apply crop and scale
+            img_cropped = crop_transform(img_tensor)
+            
+            # Convert back to numpy for display
+            img = img_cropped.numpy()
+            if img.shape[0] in [1, 3]:  # CHW -> HWC
+                img = np.transpose(img, (1, 2, 0))
+            if img.shape[-1] == 1:  # Grayscale
+                img = img.squeeze(-1)
+                ax.imshow(img, cmap='gray', vmin=vmin, vmax=vmax)
+            else:
+                ax.imshow(img, vmin=vmin, vmax=vmax)
+            ax.axis('off')
+            
+            # MEI seeds (right side, skip column 5 for spacing)
+            ax = fig.add_subplot(gs[base_row, col_idx + 6])
+            img = neuron_meis[col_idx]
+            
+            # Convert to tensor and apply crop transform
+            img_tensor = torch.from_numpy(img).float()
+            if img_tensor.dim() == 2:  # HW -> CHW
+                img_tensor = img_tensor.unsqueeze(0)
+            elif img_tensor.shape[0] not in [1, 3]:  # HWC -> CHW
+                img_tensor = img_tensor.permute(2, 0, 1)
+            
+            # Apply crop and scale
+            img_cropped = crop_transform(img_tensor)
+            
+            # Convert back to numpy for display
+            img = img_cropped.numpy()
+            if img.shape[0] in [1, 3]:  # CHW -> HWC
+                img = np.transpose(img, (1, 2, 0))
+            if img.shape[-1] == 1:  # Grayscale
+                img = img.squeeze(-1)
+                ax.imshow(img, cmap='gray', vmin=vmin, vmax=vmax)
+            else:
+                ax.imshow(img, vmin=vmin, vmax=vmax)
+            ax.axis('off')
+        
+        # Row 2: Screened least/most activating images from dataset
+        # (These are already cropped and scaled via dset transforms)
+        for col_idx in range(5):
+            # Least activating screened images (left side)
+            ax = fig.add_subplot(gs[base_row + 1, col_idx])
+            img_idx = lowest_idx[col_idx]
+            img, _ = dset[img_idx]
+            img = img.permute(1, 2, 0)  # CHW -> HWC
+            if img.shape[-1] == 1:  # Grayscale
+                img = img.squeeze(-1)
+                ax.imshow(img, cmap='gray', vmin=vmin, vmax=vmax)
+            else:
+                ax.imshow(img, vmin=vmin, vmax=vmax)
+            ax.axis('off')
+            
+            # Most activating screened images (right side)
+            ax = fig.add_subplot(gs[base_row + 1, col_idx + 6])
+            img_idx = highest_idx[col_idx]
+            img, _ = dset[img_idx]
+            img = img.permute(1, 2, 0)  # CHW -> HWC
+            if img.shape[-1] == 1:  # Grayscale
+                img = img.squeeze(-1)
+                ax.imshow(img, cmap='gray', vmin=vmin, vmax=vmax)
+            else:
+                ax.imshow(img, vmin=vmin, vmax=vmax)
+            ax.axis('off')
+        
+        # Add neuron label on the left
+        if add_neuron_labels:
+            ax_label = fig.add_subplot(gs[base_row:base_row + 2, 0])
+            ax_label.text(
+                -0.2, 0.5, f'Neuron {neuron_idx + 1}',
+                transform=ax_label.transAxes,
+                fontsize=11, color='white',
+                ha='right', va='center',
+                weight='bold',
+                rotation=90
+            )
+            ax_label.axis('off')
+    
+    # Add horizontal separator line between neurons (except after last neuron)
+    for neuron_idx in range(M - 1):
+        base_row = neuron_idx * 2
+        # Get position of a subplot in row base_row + 1 (second row of neuron)
+        temp_ax = fig.add_subplot(gs[base_row + 1, 0])
+        bbox = temp_ax.get_position()
+        temp_ax.remove()
+        
+        # Draw line at bottom of this row
+        line_y = bbox.y0
+        
+        fig.add_artist(plt.Line2D(
+            [0.02, 0.98],
+            [line_y, line_y],
+            transform=fig.transFigure,
+            color='white',
+            linewidth=1.5,
+            alpha=0.5
+        ))
+    
+    # Add column headers
+    fig.text(0.25, 0.97, 'Least Activating', 
+             ha='center', va='top', color='#00d4ff', 
+             fontsize=13, weight='bold')
+    fig.text(0.75, 0.97, 'Most Activating', 
+             ha='center', va='top', color='#ff0080', 
+             fontsize=13, weight='bold')
+    
+    plt.savefig(
+        output_file,
+        dpi=200,
+        facecolor='black',
+        edgecolor='none',
+        bbox_inches='tight',
+        pad_inches=0.1
+    )
+
+    plt.show()
     
     
 def visualize_adaptive_sampling(responses, num_samples=100, figsize=(5, 5)):

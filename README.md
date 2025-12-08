@@ -22,7 +22,7 @@ This package provides tools to:
 
 - **Load digital twin models**: Pretrained neural predictive models (deep learning models trained to predict neural responses from images) for macaque V1 and V4
 - **Screen large image datasets**: Identify most-activating (MAIs) and least-activating (LAIs) natural images for each neuron
-- **Synthesize optimal stimuli**: Generate most-exciting inputs (MEIs) and least-exciting inputs (LEIs) via gradient-based optimization
+- **Synthesize optimal stimuli**: Generate most-exciting inputs (MEIs) and least-exciting inputs (LEIs) via gradient-based optimization. The synthesis algorithm uses ideas from [https://github.com/serre-lab/Horama](https://github.com/serre-lab/Horama) for optimization in the frequency domain, though the implementation has been extended with different transforms and alternative constraints.
 - **Compute semantic axes**: Use DreamSim embeddings to analyze semantic relationships between high and low activation poles
 - **Visualize and analyze**: Plot activation curves, population statistics, and optimization trajectories
 

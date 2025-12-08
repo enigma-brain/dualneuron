@@ -7,7 +7,12 @@ import torch
 
 
 def image_to_base64(tensor, quality=95, max_size=None):
-    """Convert tensor (C, H, W) or (H, W, C) to base64 string."""
+    """Convert tensor (C, H, W) or (H, W, C) to base64 string.
+    
+    Args:
+        quality: 1-100. Values >=95 use PNG, <95 use JPEG.
+                Higher = better quality but larger file size.
+    """
     if torch.is_tensor(tensor):
         img = tensor.cpu().numpy()
     else:
@@ -56,6 +61,7 @@ def generate_optimization_viewer(
     savename='optimization_viewer.html',
     display_in_notebook=False,
     notebook_quality=50,
+    save_quality=95,
     title="Optimization Progress"
 ):
     """
@@ -66,7 +72,9 @@ def generate_optimization_viewer(
         activations: List or array of activation values (will be converted to Hz by *10)
         savename: Output HTML filename
         display_in_notebook: If True, display inline in Jupyter
-        notebook_quality: Image quality for notebook display (1-95)
+        notebook_quality: Image quality for notebook display (1-100, default 50)
+        save_quality: Image quality for saved HTML file (1-100, default 95)
+                     95+ uses PNG, <95 uses JPEG
         title: Title for the viewer
     """
     print("Processing optimization sequence...")
@@ -85,7 +93,7 @@ def generate_optimization_viewer(
         img_quality = notebook_quality
         img_max_size = 150
     else:
-        img_quality = 95
+        img_quality = save_quality
         img_max_size = None
     
     print(f"Encoding {num_steps} images...")
@@ -333,7 +341,7 @@ def generate_html(data):
         
         // Get global min/max for consistent color scaling
         const activations = DATA.activations;
-        const globalMinY = Math.min.apply(null, activations);
+        const globalMinY = 0;  // Always start at 0
         const globalMaxY = Math.max.apply(null, activations);
         const globalRangeY = globalMaxY - globalMinY || 1;
         
