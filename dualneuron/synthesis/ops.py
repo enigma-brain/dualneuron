@@ -1,10 +1,9 @@
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torchvision.ops import roi_align
-from functools import lru_cache
 
 
-@lru_cache(maxsize=8)
 def color_correlation(device):
     """
     Get the color correlation matrix for natural images.
@@ -30,6 +29,61 @@ def color_correlation(device):
         dtype=torch.float32, 
         device=device
     )
+
+
+def decorrelate_colors(image, device):
+    """
+    Transform RGB image to decorrelated color space.
+    
+    Inverse of recorrelate_colors. Transforms an image from RGB to a
+    decorrelated color space where channels are statistically independent.
+    Useful for parameterizing optimization in a better-conditioned space.
+    
+    Args:
+        image (torch.Tensor): Input RGB image, shape (3, H, W).
+        device (str or torch.device): Device for the correlation matrix.
+    
+    Returns:
+        torch.Tensor: Decorrelated image, shape (3, H, W).
+    
+    Raises:
+        AssertionError: If image is not 3-dimensional.
+    """
+    assert len(image.shape) == 3
+    correlation = color_correlation(device)
+    decorrelation = torch.linalg.inv(correlation)
+    permuted_image = image.permute(1, 2, 0).contiguous()
+    flat_image = permuted_image.view(-1, 3)
+    decorrelated = torch.matmul(flat_image, decorrelation)
+    decorrelated = decorrelated.view(permuted_image.shape).permute(2, 0, 1)
+    return decorrelated
+
+
+def recorrelate_colors(image, device):
+    """
+    Transform decorrelated image to RGB color space.
+    
+    Inverse of decorrelate_colors. Transforms an image from a decorrelated
+    color space back to RGB with correlations matching natural images.
+    Used in image synthesis to produce more realistic colors.
+    
+    Args:
+        image (torch.Tensor): Input decorrelated image, shape (3, H, W).
+        device (str or torch.device): Device for the correlation matrix.
+    
+    Returns:
+        torch.Tensor: RGB image, shape (3, H, W).
+    
+    Raises:
+        AssertionError: If image is not 3-dimensional.
+    """
+    assert len(image.shape) == 3
+    correlation = color_correlation(device)
+    permuted_image = image.permute(1, 2, 0).contiguous()
+    flat_image = permuted_image.view(-1, 3)
+    recorrelated = torch.matmul(flat_image, correlation)
+    recorrelated = recorrelated.view(permuted_image.shape).permute(2, 0, 1)
+    return recorrelated
 
 
 def recorrelate_colors(image, device):
@@ -197,3 +251,44 @@ def change_norm(image, target_norm):
     else:
         norms = torch.norm(image.reshape(image.shape[0], -1), dim=1, keepdim=True) + eps
         return image * (target_norm / norms.view(-1, 1, 1, 1))
+    
+    
+def get_blur_params(step, total_steps, schedule='cosine', sigma_max=2.5, sigma_min=0.5):
+    """
+    Compute blur parameters that decrease over optimization.
+    
+    Early steps use strong smoothing to establish global structure.
+    Later steps use weak smoothing to allow fine details.
+    
+    Args:
+        step (int): Current optimization step.
+        total_steps (int): Total number of steps.
+        schedule (str): How sigma decreases ('linear', 'cosine', 'step').
+        sigma_max (float): Initial blur strength.
+        sigma_min (float): Final blur strength.
+    
+    Returns:
+        tuple: (kernel_size, sigma) for gaussian_blur.
+    """
+    progress = step / total_steps
+    
+    if schedule is None:
+        return None, None
+    if schedule == 'linear':
+        sigma = sigma_max + (sigma_min - sigma_max) * progress
+    elif schedule == 'cosine':
+        sigma = sigma_min + (sigma_max - sigma_min) * (1 + np.cos(np.pi * progress)) / 2
+    elif schedule == 'step':
+        if progress < 0.33:
+            sigma = sigma_max
+        elif progress < 0.66:
+            sigma = (sigma_max + sigma_min) / 2
+        else:
+            sigma = sigma_min
+    else:
+        raise ValueError(f'Unknown schedule: {schedule}')
+    
+    kernel_size = int(sigma * 3) // 2 * 2 + 1
+    kernel_size = max(3, kernel_size)
+    
+    return kernel_size, sigma

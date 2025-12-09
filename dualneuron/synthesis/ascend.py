@@ -8,9 +8,11 @@ import numpy as np
 
 from dualneuron.synthesis.ops import (
     recorrelate_colors,
+    decorrelate_colors,
     create_crops,
     add_noise,
-    change_norm
+    change_norm,
+    get_blur_params
 )
 
 
@@ -455,6 +457,9 @@ def pixel_ascending(
     jitter_std=0.1,
     oversample=1, 
     reflect_pad_frac=0.02,
+    blur_schedule='linear',
+    sigma_max=2.0,
+    sigma_min=0.5,
     simulation_function=None,
     simulation_axis=None,
     simulation_weight=0.0,
@@ -495,6 +500,10 @@ def pixel_ascending(
             improves antialiasing quality. Default: 1.
         reflect_pad_frac (float): Fraction of image size to pad with
             reflection on each side. Default: 0.02.
+        blur_schedule (str): Schedule for gradient blur ('linear', 'cosine', 'step', None).
+            Default: 'linear'.
+        sigma_max (float): Initial blur sigma (strong smoothing). Default: 2.0.
+        sigma_min (float): Final blur sigma (weak smoothing). Default: 0.5.
         simulation_function (callable, optional): Feature extractor for semantic guidance.
         simulation_axis (np.ndarray, optional): Embedding direction for semantic guidance.
         simulation_weight (float): Weight for simulation loss. Default: 0.0.
@@ -529,6 +538,9 @@ def pixel_ascending(
                 align_corners=False
             ).squeeze(0)
         
+        if channels == 3:
+            init_image = decorrelate_colors(init_image, device)
+        
         # Inverse sigmoid to get parameter values
         init_image_clipped = torch.clamp(init_image, l + 1e-6, h - 1e-6)
         init_image_normalized = (init_image_clipped - l) / (h - l)
@@ -556,13 +568,6 @@ def pixel_ascending(
             eps=1e-8
         )   
     
-    optimizer = torch.optim.Adam(
-        [image_param], 
-        lr=learning_rate,
-        betas=(0.9, 0.999), 
-        eps=1e-8
-    )
-    
     if lr_schedule:
         scheduler = CosineAnnealingLR(
             optimizer, 
@@ -586,6 +591,8 @@ def pixel_ascending(
     if save_all_steps:
         with torch.no_grad():
             init_img = torch.sigmoid(image_param) * (h - l) + l
+            if channels == 3:
+                init_img = recorrelate_colors(init_img, device)
             if target_norm is not None:
                 init_img = change_norm(init_img, target_norm)
             init_act = objective_function(init_img.unsqueeze(0)).item()
@@ -604,9 +611,12 @@ def pixel_ascending(
     else:
         pbar = range(total_steps)
 
-    for _ in pbar:
+    for step in pbar:
         optimizer.zero_grad()
         img = torch.sigmoid(image_param) * (h - l) + l
+    
+        if channels == 3:
+            img = recorrelate_colors(img, device)
         
         loss, img = optimization_step(
             objective_function,
@@ -620,11 +630,17 @@ def pixel_ascending(
 
         loss.backward()
         with torch.no_grad():
-            image_param.grad = gaussian_blur(
-                image_param.grad.unsqueeze(0), 
-                kernel_size=5, 
-                sigma=1.5
-            ).squeeze(0)
+            k, s = get_blur_params(
+                step, total_steps, 
+                blur_schedule, sigma_max, 
+                sigma_min
+            )
+            if k is not None and s is not None:
+                image_param.grad = gaussian_blur(
+                    image_param.grad.unsqueeze(0), 
+                    kernel_size=k, 
+                    sigma=s
+                ).squeeze(0)
 
         transparency += torch.abs(img.grad)
         optimizer.step()
@@ -634,6 +650,8 @@ def pixel_ascending(
 
         with torch.no_grad():
             clean_img = torch.sigmoid(image_param) * (h - l) + l
+            if channels == 3:
+                clean_img = recorrelate_colors(clean_img, device)
             
             if target_norm is not None:
                 clean_img = change_norm(clean_img, target_norm)
