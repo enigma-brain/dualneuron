@@ -19,6 +19,7 @@ import torch
 from torch.utils.data import DataLoader
 
 TOKEN = os.getenv("HF_TOKEN")
+DATA_DIR = os.getenv("DATA_DIR")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 rng = np.random.RandomState(123)
 
@@ -102,26 +103,30 @@ def screen_activations(
         device=device
     )
     
-    package_dir = Path(dualneuron.__file__).parent
-    mask_path = package_dir / "twins" / "V4ColorTaskDriven" / "mask.npy"
-    mask = np.load(mask_path)
-    
     if model == 'v1':
         output_size = (93, 93)
         norm = 12.0
         num_channels = 1
+        model_name = "V1GrayTaskDriven"
     elif model == 'v4':
         output_size = (100, 100)
         norm = 40.0
         num_channels = 3
+        model_name = "V4ColorTaskDriven"
     elif model == 'v4g':
         output_size = (100, 100)
-        norm = 20.0
+        norm = 25.0
         num_channels = 1
+        model_name = "V4GrayTaskDriven"
     else:
         output_size = (224, 224)
         norm = 80.0
         num_channels = 3
+        model_name = "V4ColorTaskDriven" # use V4 mask for other models too
+    
+    package_dir = Path(dualneuron.__file__).parent
+    mask_path = package_dir / "twins" / model_name / "mask.npy"
+    mask = np.load(mask_path)
     
     if dataset == "rendered":    
         dset = RenderedImages(
@@ -224,16 +229,16 @@ def screen_activations(
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Get DERS")
-    parser.add_argument("--data_dir", type=str, help="Where the data is saved")
-    parser.add_argument("--output_dir", type=str, default=None, help="Where the output is saved")
+    parser.add_argument("--data_dir", type=str, default=DATA_DIR + "datasets", help="Where the data is saved")
+    parser.add_argument("--output_dir", type=str, default=DATA_DIR + "dryad", help="Where the output is saved")
     parser.add_argument("--token", type=str, default=TOKEN, help="Huggingface token for imagenet")
     parser.add_argument("--split", type=str, default="train", help="train, validation, or test")
-    parser.add_argument("--dataset", type=str, help="rendered or imagenet")
-    parser.add_argument("--model", type=str, default="v4", help="model architecture")
+    parser.add_argument("--dataset", type=str, default="imagenet", help="rendered or imagenet")
+    parser.add_argument("--model", type=str, default="v4g", help="model architecture")
     parser.add_argument("--layer", type=str, default=None, help="layer name, if none use final layer")
     parser.add_argument("--location", default="center", help="spatial location for activation extraction")
     parser.add_argument("--ensemble", type=bool, default=True, help="use ensemble model")
-    parser.add_argument("--batch_size", type=int, default=32, help="batch size for dataloader")
+    parser.add_argument("--batch_size", type=int, default=64, help="batch size for dataloader")
     parser.add_argument("--num_workers", type=int, default=0, help="number of workers for dataloader")
     parser.add_argument("--device", type=str, default="cuda", help="device to run on")
     args = parser.parse_args()
