@@ -1,5 +1,3 @@
-# dualneuron/synthesis/objectives.py
-
 import torch
 import torch.nn.functional as F
 
@@ -9,7 +7,8 @@ def response_objective(
     target, 
     mode='project',
     sign=1,
-    loss_type='mse'
+    loss_type='mse',
+    model_kwargs=None
 ):
     """
     Create an objective function for image synthesis based on population response.
@@ -30,34 +29,18 @@ def response_objective(
             - 'mse': Mean squared error (euclidean distance)
             - 'cosine': Cosine similarity (direction only, ignores magnitude)
             - 'correlation': Pearson correlation (centered cosine)
+        model_kwargs: Optional dict of kwargs to pass to model (e.g., {'multiplex': True})
     
     Returns:
         Callable that takes (N, C, H, W) images and returns scalar to maximize
-    
-    Examples:
-        # MEI for neuron 42
-        obj = response_objective(model, 42)
-        
-        # LEI for neuron 42
-        obj = response_objective(model, 42, sign=-1)
-        
-        # Reconstruct from response (MSE)
-        obj = response_objective(model, target_response, mode='reconstruct', loss_type='mse')
-        
-        # Find anti-correlated response pattern
-        obj = response_objective(model, target_response, mode='reconstruct', loss_type='correlation', sign=-1)
-        
-        # Synthesize along PC1 direction
-        obj = response_objective(model, pc1, mode='project')
-        
-        # Synthesize along negative PC1 direction
-        obj = response_objective(model, pc1, mode='project', sign=-1)
     """
+    
+    model_kwargs = model_kwargs or {}
     
     # Single neuron case
     if isinstance(target, int):
         def objective(images):
-            return sign * model(images)[:, target].mean()
+            return sign * model(images, **model_kwargs)[:, target].mean()
         return objective
     
     # Vector target - ensure 1D and detached
@@ -67,14 +50,14 @@ def response_objective(
         direction = t / (t.norm() + 1e-8)
         
         def objective(images):
-            pred = model(images).mean(dim=0).flatten()
+            pred = model(images, **model_kwargs).mean(dim=0).flatten()
             d = direction.to(pred.device)
             return sign * torch.dot(pred, d)
         
     elif mode == 'reconstruct':
         if loss_type == 'mse':
             def objective(images):
-                pred = model(images).mean(dim=0).flatten()
+                pred = model(images, **model_kwargs).mean(dim=0).flatten()
                 tgt = t.to(pred.device)
                 return -F.mse_loss(pred, tgt)
             
@@ -82,7 +65,7 @@ def response_objective(
             t_norm = t.norm() + 1e-8
             
             def objective(images):
-                pred = model(images).mean(dim=0).flatten()
+                pred = model(images, **model_kwargs).mean(dim=0).flatten()
                 tgt = t.to(pred.device)
                 return sign * torch.dot(pred, tgt) / (pred.norm() * t_norm + 1e-8)
             
@@ -91,7 +74,7 @@ def response_objective(
             t_centered_norm = t_centered.norm() + 1e-8
             
             def objective(images):
-                pred = model(images).mean(dim=0).flatten()
+                pred = model(images, **model_kwargs).mean(dim=0).flatten()
                 tc = t_centered.to(pred.device)
                 pred_centered = pred - pred.mean()
                 return sign * torch.dot(pred_centered, tc) / (pred_centered.norm() * t_centered_norm + 1e-8)
