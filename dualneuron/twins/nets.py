@@ -333,7 +333,9 @@ def load_model(
     ensemble=False, 
     centered=True, 
     untrained=False,
-    device='cuda'
+    device='cuda',
+    cache_dir='./models',
+    dreamsim_type="dino_vitb16"
 ):
     """
     Load a neural network model for activation extraction or prediction.
@@ -363,6 +365,8 @@ def load_model(
             Default: False.
         device (str or torch.device): Device to move model to.
             Default: 'cuda'.
+        cache_dir (str, optional): Directory to cache downloaded models.
+            Default: './models'.
     
     Returns:
         torch.nn.Module or ActivationExtractor: The loaded model in eval mode.
@@ -377,7 +381,8 @@ def load_model(
         'vgg16', 
         'vgg16_bn', 
         'resnet50', 
-        'vit_b_16'
+        'vit_b_16',
+        'dreamsim'
     ]
     if architecture == 'v4':
         model = V4ColorTaskDriven(
@@ -396,6 +401,14 @@ def load_model(
             ensemble=ensemble, 
             centered=centered, 
             untrained=untrained
+        )
+    elif architecture == 'dreamsim':
+        from dreamsim import dreamsim
+        model, _ = dreamsim(
+            pretrained=True, 
+            device=device, 
+            cache_dir=cache_dir,
+            dreamsim_type=dreamsim_type
         )
     else:
         if untrained:

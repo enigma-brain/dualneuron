@@ -7,6 +7,23 @@ from tqdm import tqdm
 import torch
 
 
+def get_pole_indices(indices_path, m=10):
+    """
+    Extract the M lowest and M highest indices from a sorted indices file.
+    
+    Args:
+        indices_path: Path to .npy file containing sorted indices
+        m: Number of indices to extract from each pole
+    
+    Returns:
+        dict with keys:
+            - 'low': indices of M lowest elements
+            - 'high': indices of M highest elements
+    """
+    indices = np.load(indices_path)
+    return {'low': indices[:m], 'high': indices[-m:]}
+
+
 def gini(x):
     """
     Compute the Gini coefficient of a numpy array as a sparsity measure.
