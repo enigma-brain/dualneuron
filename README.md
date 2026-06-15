@@ -300,7 +300,8 @@ dualneuron/
 │
 └── dream/                  # Semantic embedding analysis
     ├── axis.py            # Semantic axis computation
-    └── sim.py             # DreamSim embedding extraction
+    ├── sim.py             # DreamSim embedding extraction
+    └── similarity.py      # MAI/LAI coherence (Fig 6) and 2D similarity space (Fig 10)
 ```
 
 ## Data Availability
