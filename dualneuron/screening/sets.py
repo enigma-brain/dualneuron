@@ -1,4 +1,6 @@
 import os
+import io
+import zipfile
 import torch
 from glob import glob
     
@@ -7,6 +9,9 @@ from torchvision import transforms
 from PIL import Image
 import numpy as np
 import cv2
+
+from dotenv import load_dotenv
+load_dotenv()
 
 from datasets import load_dataset
 
@@ -215,10 +220,14 @@ class ImagenetImages(Dataset):
         if data_dir is not None:
             os.makedirs(data_dir, exist_ok=True)
         
+        # Fall back to HF_TOKEN from the environment (.env) if not passed
+        if token is None:
+            token = os.getenv("HF_TOKEN")
+
         # Load dataset - token only needed for first download
         # After that, it will load from cache
         self.set = load_dataset(
-            "ILSVRC/imagenet-1k", 
+            "ILSVRC/imagenet-1k",
             token=token,  # Use passed token (can be None if already cached)
             trust_remote_code=False,
             cache_dir=data_dir,
@@ -332,7 +341,10 @@ class RenderedImages(Dataset):
     ):
         """
         Rendered images dataset with flexible transform pipeline.
-        
+
+        Reads rendered scenes from loose .png files in data_dir, or directly from the
+        Dryad archives (batch_*.zip) when present (no unzip needed), in global scene order.
+
         No base transforms - all transforms are optional.
         
         Optional transforms (controlled by use_* flags):
@@ -345,7 +357,8 @@ class RenderedImages(Dataset):
         - use_norm: Apply norm transform (requires norm parameter)
         
         Args:
-            datadir: Where the png data is saved
+            data_dir: Directory of rendered scenes; either loose .png files or the
+                Dryad archives (batch_*.zip), which are read directly (no unzip).
             use_center_crop: Whether to apply center cropping
             use_resize_output: Whether to resize to output_size
             use_grayscale: Whether to convert to grayscale
@@ -362,8 +375,23 @@ class RenderedImages(Dataset):
             crop_padding_frac: Padding fraction for CropToMask (default: 0.1)
         """
         
-        png_files = sorted(glob(os.path.join(data_dir, '*.png')))
-        self.png_files = png_files
+        # Source can be either a directory of loose PNGs, or the Dryad rendered
+        # archives (batch_*.zip), each holding scene_NNNNNN.png files. When zips
+        # are present, scenes are read directly from them, preserving the global
+        # scene order (batch_001/scene_000000 ... batch_020/scene_199999) so that
+        # indices match the ordered npz files in the Dryad release.
+        self.zip_paths = sorted(glob(os.path.join(data_dir, 'batch_*.zip')))
+        if self.zip_paths:
+            self.from_zip = True
+            self.index = []  # (zip_idx, member_name) in global scene order
+            for zi, zp in enumerate(self.zip_paths):
+                with zipfile.ZipFile(zp) as zf:
+                    members = sorted(m for m in zf.namelist() if m.lower().endswith('.png'))
+                self.index.extend((zi, m) for m in members)
+            self._zhandles = {}  # per-process ZipFile cache (DataLoader fork-safe)
+        else:
+            self.from_zip = False
+            self.png_files = sorted(glob(os.path.join(data_dir, '*.png')))
         self.mask = mask
         self.output_size = output_size
         self.crop_size = crop_size
@@ -426,15 +454,29 @@ class RenderedImages(Dataset):
         else:
             return transforms.Normalize(mean, std)
 
+    def _get_zip(self, zip_idx):
+        """Return a per-process ZipFile handle (lazily opened, DataLoader fork-safe)."""
+        handles = self._zhandles.setdefault(os.getpid(), {})
+        zf = handles.get(zip_idx)
+        if zf is None:
+            zf = zipfile.ZipFile(self.zip_paths[zip_idx])
+            handles[zip_idx] = zf
+        return zf
+
     def __len__(self):
-        return len(self.png_files)
+        return len(self.index) if self.from_zip else len(self.png_files)
 
     def __getitem__(self, idx):
-        img_path = self.png_files[idx]
-        image = Image.open(img_path)
+        if self.from_zip:
+            zip_idx, member = self.index[idx]
+            image = Image.open(io.BytesIO(self._get_zip(zip_idx).read(member)))
+            label = member
+        else:
+            label = self.png_files[idx]
+            image = Image.open(label)
         tensor = self.transform(image)
-        
+
         if self.num_channels == 3 and tensor.shape[0] == 1:
             tensor = tensor.repeat(3, 1, 1)
 
-        return tensor, img_path
+        return tensor, label

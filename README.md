@@ -62,12 +62,59 @@ pip install -e .
 
 ## Configuration
 
-Create a `.env` file for credentials:
+Create a `.env` file in the repository root (copy `.env.example`):
 
 ```bash
-HF_TOKEN=your_huggingface_token  # Required for ImageNet access
-DATA_DIR=/path/to/data           # Optional: default data directory
+cp .env.example .env
 ```
+
+```bash
+HF_TOKEN=your_huggingface_token   # Hugging Face token (needed to download ImageNet)
+DATA_DIR=/path/to/your/data/      # Root data directory (see layout below)
+MODELS_DIR=${DATA_DIR}/models     # Where model weights (e.g. DreamSim) are cached
+```
+
+`DATA_DIR` is the root under which the ImageNet cache, the cached model weights,
+and the Dryad data live:
+
+```
+DATA_DIR/
+├── datasets/          # ImageNet, downloaded automatically by Hugging Face on first run
+├── models/            # cached model weights (e.g. DreamSim)
+└── dryad/             # data from the Dryad release
+    ├── rendered/      # rendered-scene archives batch_001.zip ... batch_020.zip
+    └── *.npz          # ordered responses/indices, MEIs/LEIs
+```
+
+### Getting ImageNet
+
+ImageNet is **not** redistributed on Dryad (its license does not allow it), so you
+download it yourself from Hugging Face. One-time setup:
+
+1. Create a Hugging Face account and request access to the gated
+   [`ILSVRC/imagenet-1k`](https://huggingface.co/datasets/ILSVRC/imagenet-1k)
+   dataset (accept its terms on that page).
+2. Create an access token and put it in `.env` as `HF_TOKEN`.
+3. The first screening run downloads ImageNet into `DATA_DIR/datasets` using the
+   token; afterwards it loads from that cache and the token is no longer needed.
+
+The download is handled transparently by `ImagenetImages` / `screen_activations`
+via `datasets.load_dataset("ILSVRC/imagenet-1k", token=..., cache_dir=DATA_DIR/datasets)`.
+The token is read from `HF_TOKEN` in `.env` automatically if you do not pass it
+explicitly.
+
+### Getting the Dryad data
+
+The neural responses, sorted indices, MEIs/LEIs, and rendered scenes are released
+on Dryad: [https://doi.org/10.5061/dryad.q573n5tx3](https://datadryad.org/dataset/doi:10.5061/dryad.q573n5tx3).
+Dryad does not allow anonymous scripted downloads, so download the files you need
+from that page in a browser and place them under `DATA_DIR/dryad`:
+
+- the 20 rendered-scene archives `batch_001.zip ... batch_020.zip` go in `DATA_DIR/dryad/rendered/`
+- the `.npz` files (e.g. `v4_rendered_ordered_responses.npz`, `v4_meis.npz`) go in `DATA_DIR/dryad/`
+
+`RenderedImages` reads the rendered scenes directly from the `batch_*.zip` archives
+in `DATA_DIR/dryad/rendered/`, so there is no need to unzip them.
 
 ## Usage
 
@@ -97,12 +144,17 @@ model = load_model(
 Identify which natural images most/least activate each neuron:
 
 ```python
+import os
+from dotenv import load_dotenv
 from dualneuron.screening.run import screen_activations
 
-# Screen ImageNet to find MAIs/LAIs
+load_dotenv()  # reads HF_TOKEN and DATA_DIR from .env
+data_dir = os.path.join(os.environ["DATA_DIR"], "datasets")  # ImageNet cache
+
+# Screen ImageNet to find MAIs/LAIs (token read from .env if omitted)
 sorted_responses, sorted_indices = screen_activations(
-    data_dir="/path/to/imagenet",
-    token="your_hf_token",
+    data_dir=data_dir,
+    token=os.getenv("HF_TOKEN"),
     split='train',
     dataset="imagenet",     # or "rendered" for synthetic scenes
     model='v4',             # 'v1', 'v4', or 'v4g'
@@ -262,6 +314,9 @@ This includes:
 - Sorted ImageNet indices (MAIs/LAIs)
 - Predicted activation profiles
 - Baseline firing rates and reliability metrics
+
+ImageNet itself is **not** included (license restrictions). See
+[Getting ImageNet](#getting-imagenet) to download it via Hugging Face.
 
 ## Citation
 

@@ -21,8 +21,16 @@ from nnfabrik.builder import get_model
 import torchvision.models as models
 
 from dualneuron.twins.activations import (
-    ActivationExtractor, 
+    ActivationExtractor,
     count_units
+)
+
+from dotenv import load_dotenv
+load_dotenv()
+
+DATA_DIR = os.getenv("DATA_DIR")
+MODELS_DIR = os.getenv("MODELS_DIR") or (
+    os.path.join(DATA_DIR, "models") if DATA_DIR else "./models"
 )
 
 
@@ -334,7 +342,7 @@ def load_model(
     centered=True, 
     untrained=False,
     device='cuda',
-    cache_dir='./models',
+    cache_dir=None,
     dreamsim_type="dino_vitb16"
 ):
     """
@@ -365,8 +373,8 @@ def load_model(
             Default: False.
         device (str or torch.device): Device to move model to.
             Default: 'cuda'.
-        cache_dir (str, optional): Directory to cache downloaded models.
-            Default: './models'.
+        cache_dir (str, optional): Directory to cache downloaded models (e.g.
+            DreamSim). Defaults to MODELS_DIR (DATA_DIR/models).
     
     Returns:
         torch.nn.Module or ActivationExtractor: The loaded model in eval mode.
@@ -405,9 +413,9 @@ def load_model(
     elif architecture == 'dreamsim':
         from dreamsim import dreamsim
         model, _ = dreamsim(
-            pretrained=True, 
-            device=device, 
-            cache_dir=cache_dir,
+            pretrained=True,
+            device=device,
+            cache_dir=cache_dir or MODELS_DIR,
             dreamsim_type=dreamsim_type
         )
     else:

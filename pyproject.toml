@@ -15,7 +15,8 @@ dependencies = [
 	"datasets",
 	"opencv-python",
 	"python-dotenv",
-	"dreamsim"
+	"dreamsim",
+	"datajoint<2.2"
 ]
 
 [tool.setuptools.packages.find]
