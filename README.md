@@ -52,12 +52,15 @@ Each model uses **ensemble averaging** (5-10 models) for robust predictions and 
 **Requirements:** Python ≥3.10
 
 ```bash
-# Create virtual environment
-python3.10 -m venv .venv
-source .venv/bin/activate
+# Install uv if you don't have it:
+#   https://docs.astral.sh/uv/getting-started/installation/
 
-# Install package
-pip install -e .
+# Create the virtual environment and install the package with all dependencies
+# (including a GPU-compatible torch from the configured CUDA 12.1 index)
+uv sync
+
+# Activate it (or prefix commands with `uv run`)
+source .venv/bin/activate
 ```
 
 ## Configuration
@@ -69,21 +72,31 @@ cp .env.example .env
 ```
 
 ```bash
-HF_TOKEN=your_huggingface_token   # Hugging Face token (needed to download ImageNet)
-DATA_DIR=/path/to/your/data/      # Root data directory (see layout below)
-MODELS_DIR=${DATA_DIR}/models     # Where model weights (e.g. DreamSim) are cached
+HF_TOKEN=your_huggingface_token                 # Hugging Face token (to download ImageNet)
+DATA_DIR=/path/to/your/data                     # Root data directory (see layout below)
+IMAGENET_CACHE_DIR=${DATA_DIR}/datasets         # Hugging Face ImageNet cache
+RENDERED_DIR=${DATA_DIR}/datasets/rendered      # Rendered-scene archives (batch_*.zip)
+MODELS_DIR=${DATA_DIR}/models                   # Cached model weights (e.g. DreamSim)
+ANALYSIS_DIR=${DATA_DIR}/DUAL-FEATURE-ANALYSIS  # Regenerated screening/synthesis/DreamSim outputs
+LOGS_DIR=./logs                                 # Progress logs (one self-rewriting line per run)
+PAPER_FIG_DIR=./figs                            # Saved figures
 ```
+
+Directories are created on demand by the scripts that write into them; `LOGS_DIR`
+and `PAPER_FIG_DIR` are gitignored.
 
 `DATA_DIR` is the root under which the ImageNet cache, the cached model weights,
 and the Dryad data live:
 
 ```
 DATA_DIR/
-├── datasets/          # ImageNet, downloaded automatically by Hugging Face on first run
-├── models/            # cached model weights (e.g. DreamSim)
-└── dryad/             # data from the Dryad release
-    ├── rendered/      # rendered-scene archives batch_001.zip ... batch_020.zip
-    └── *.npz          # ordered responses/indices, MEIs/LEIs
+├── datasets/                  # Hugging Face ImageNet cache (IMAGENET_CACHE_DIR)
+│   └── rendered/              # rendered-scene archives batch_*.zip (RENDERED_DIR)
+├── models/                    # cached model weights, e.g. DreamSim (MODELS_DIR)
+├── DUAL-FEATURE-ANALYSIS/     # regenerated outputs (ANALYSIS_DIR); see "Saved-file layout"
+│   ├── v4/
+│   └── v1/
+└── dryad/                     # optional: the published Dryad release
 ```
 
 ### Getting ImageNet
@@ -108,13 +121,13 @@ explicitly.
 The neural responses, sorted indices, MEIs/LEIs, and rendered scenes are released
 on Dryad: [https://doi.org/10.5061/dryad.q573n5tx3](https://datadryad.org/dataset/doi:10.5061/dryad.q573n5tx3).
 Dryad does not allow anonymous scripted downloads, so download the files you need
-from that page in a browser and place them under `DATA_DIR/dryad`:
+from that page in a browser:
 
-- the 20 rendered-scene archives `batch_001.zip ... batch_020.zip` go in `DATA_DIR/dryad/rendered/`
-- the `.npz` files (e.g. `v4_rendered_ordered_responses.npz`, `v4_meis.npz`) go in `DATA_DIR/dryad/`
-
-`RenderedImages` reads the rendered scenes directly from the `batch_*.zip` archives
-in `DATA_DIR/dryad/rendered/`, so there is no need to unzip them.
+- the rendered-scene archives `batch_*.zip` go in **`RENDERED_DIR`** (default
+  `${DATA_DIR}/datasets/rendered`) — `RenderedImages` reads them directly, no unzip needed
+- the published `.npz` (ordered responses/indices, MEIs/LEIs) are **optional**: this
+  pipeline regenerates its own into `ANALYSIS_DIR` (see "Reproducing the paper"), so you
+  only need them if you want to start from the released results rather than recompute them
 
 ## Usage
 
@@ -206,15 +219,19 @@ activation = result['activation']  # Final activation value
 Generate MEIs and LEIs for all neurons:
 
 ```python
-from dualneuron.synthesis.generate import generate_poles
+# Run one area per process (each on its own GPU); resumable, one npz per neuron:
+#   CUDA_VISIBLE_DEVICES=0 python -m dualneuron.synthesis.generate --area v4
+#   CUDA_VISIBLE_DEVICES=1 python -m dualneuron.synthesis.generate --area v1
 
-# Generate both poles for V1 and V4 neurons
-generate_poles(
-    output_dir="results/",
-    num_seeds=5,          # Multiple random initializations
-    v1_neurons=458,       # Number of V1 neurons (or list of IDs)
-    v4_neurons=394        # Number of V4 neurons (or list of IDs)
+from dualneuron.synthesis.generate import generate
+
+generate(
+    area="v4",           # "v4" or "v1"
+    num_seeds=10,        # random initializations per neuron
+    neurons=None,        # default: the well-predicted set (correlation-to-average > 0.4)
 )
+# -> ANALYSIS_DIR/v4/synthesis/v4_neuron{id:04d}.npz
+#    (mei/lei image, alpha, and activation for each seed)
 ```
 
 ### Semantic Analysis with DreamSim
@@ -276,33 +293,149 @@ plot_neuron_activation(neuron_id=42, resp_dir="responses/", response_stats=stats
 
 ```
 dualneuron/
+├── utils.py                # Shared helpers: env_dir, ensure_dir, RewriteLine (logs),
+│                           #   well_predicted_neurons (corr>0.4), sparse_split (skewness<2)
 ├── twins/                  # Digital twin neural predictive models
-│   ├── nets.py            # Model loaders (V1GrayTaskDriven, V4ColorTaskDriven, etc.)
+│   ├── nets.py            # Model loaders (V1GrayTaskDriven, V4ColorTaskDriven, EnsembleModel)
 │   ├── activations.py     # Activation extraction utilities
-│   ├── V1GrayTaskDriven/  # V1 model weights & metadata
-│   ├── V4ColorTaskDriven/ # V4 color model weights & metadata
-│   └── V4GrayTaskDriven/  # V4 grayscale model weights & metadata
+│   ├── V1GrayTaskDriven/  # V1 weights + mask.npy (RF) + correlations.npy
+│   ├── V4ColorTaskDriven/ # V4 color weights + mask.npy + correlations.npy
+│   └── V4GrayTaskDriven/  # V4 grayscale weights & metadata
 │
-├── screening/              # Large-scale image screening
-│   ├── run.py             # Main screening function
-│   ├── sets.py            # ImageNet & rendered dataset loaders
+├── screening/              # Large-scale image screening (MAIs/LAIs)
+│   ├── run.py             # screen_activations; --member i for a single ensemble member
+│   ├── sets.py            # ImageNet & rendered dataset loaders / transforms
 │   ├── utils.py           # Statistics (Gini coefficient, adaptive sampling)
 │   └── visualize.py       # Population & single-neuron visualizations
 │
-├── synthesis/              # Stimulus optimization
-│   ├── ascend.py          # Fourier & pixel gradient ascent methods
-│   ├── generate.py        # Batch MEI/LEI generation
-│   ├── ops.py             # Image operations (crops, noise, normalization)
+├── synthesis/              # Stimulus optimization (MEIs/LEIs)
+│   ├── ascend.py          # Fourier (V4) & pixel (V1) gradient ascent
+│   ├── generate.py        # Per-neuron MEI/LEI generation (resumable)
+│   ├── ops.py             # Image ops (create_crops, create_neural_crops, norm, ...)
 │   ├── visualize.py       # Optimization trajectory visualization
-│   └── priors/            # Natural image magnitude spectra
-│       ├── natural_gray.npy
-│       └── natural_rgb.npy
+│   └── priors/            # Natural image magnitude spectra (natural_{gray,rgb}.npy)
 │
-└── dream/                  # Semantic embedding analysis
-    ├── axis.py            # Semantic axis computation
-    ├── sim.py             # DreamSim embedding extraction
-    └── similarity.py      # MAI/LAI coherence (Fig 6) and 2D similarity space (Fig 10)
+└── dream/                  # DreamSim embedding analysis
+    ├── sim.py             # DreamSim embedding extraction (fp16, per-area defaults)
+    ├── subset.py          # Build the per-area ImageNet embedding subset
+    ├── similarity.py      # MAI/LAI coherence d-prime (Fig 6), 2D similarity space (Fig 10)
+    └── axis.py            # Semantic axis computation (synthesis guidance)
 ```
+
+## Reproducing the paper — pipeline, runs, and status
+
+The analyses form one dependency chain; each stage's output feeds the next:
+
+**synthesis → acquire mask → screening → DreamSim → similarity (d-prime + R² vs. sparsity)**
+
+1. **Synthesis** (`synthesis/`). Gradient ascent on the centered ensemble twins produces,
+   per well-predicted neuron, a most-exciting input (MEI) and a least-exciting input (LEI):
+   V4 in the Fourier phase domain (`fourier_ascending`, natural-amplitude prior), V1 in
+   pixels (`pixel_ascending`), 10 seeds each, ℓ2-constrained (40 V4 / 12 V1). One npz per neuron.
+2. **Acquire mask.** Each area's receptive-field mask is the **mean over its synthesized
+   MEIs/LEIs**, with a Gaussian-softened boundary (no hard edge). Stored at
+   `dualneuron/twins/{model}/mask.npy`, it is the shared input to both screening and DreamSim,
+   so each evaluates exactly the retinotopic region its neuron drives. (The shipped masks were
+   acquired this way from the published MEIs/LEIs.)
+3. **Screening** (`screening/`). Every image is RF-masked (bg 0) and ℓ2-normalized, run through
+   the twins, and sorted per neuron to give MAIs/LAIs. Sources: 200,000 rendered scenes and the
+   full 1,281,167 ImageNet-1k train images. Use the **ensemble** (default) or a single
+   **member** (`--member i`).
+4. **DreamSim** (`dream/sim.py`, `dream/subset.py`). Each image is RF-masked (neutral-gray
+   bg 0.45), contrast-normalized, and embedded into the 1792-d DreamSim ensemble space
+   (penultimate layer, unit-norm, fp16). Rendered = all 200k; ImageNet = a subset from
+   `subset.py` (every neuron's K=15 MAIs+LAIs ∪ a 200k uniform sample), passed via `--indices_path`.
+5. **Similarity** (`dream/similarity.py`). From the embeddings + the screening order:
+   **Fig 6 d-prime** (within-MAI / within-LAI cosine coherence vs. random) and **Fig 10 2D
+   similarity space** (each image's similarity to a neuron's MAI/LAI → linear-fit R²), run over
+   **all** well-predicted neurons and related to each neuron's **skewness** so R²/d-prime form a
+   continuous spectrum across sparsity (skewness = 2 is only a soft boundary; `utils.sparse_split`).
+
+### Paper → code
+
+| Paper | Code |
+|---|---|
+| Fig 1 — twins + inclusion (corr-to-avg > 0.4) | `twins/nets.py`, `utils.well_predicted_neurons` |
+| Fig 2 — sparseness (skewness < 2) | `utils.sparse_split` (on the ImageNet screening) |
+| Figs 3–5 — MEIs/LEIs + MAIs/LAIs | `synthesis/generate.py` + `screening/run.py` |
+| Fig 6 — DreamSim d-prime | `dream/sim.py` + `dream/similarity.py` |
+| Fig 10 — 2D similarity space, R² vs. sparsity | `dream/similarity.py` |
+
+### Commands (install → analysis)
+
+```bash
+uv sync                                    # env + GPU torch (cu121)
+
+# Synthesis — one area per GPU; resumable
+CUDA_VISIBLE_DEVICES=0 python -m dualneuron.synthesis.generate --area v4
+CUDA_VISIBLE_DEVICES=1 python -m dualneuron.synthesis.generate --area v1
+
+# Screening — ensemble (drop --member); a single member with --member i
+CUDA_VISIBLE_DEVICES=0 python -m dualneuron.screening.run --model v4 --dataset rendered --num_workers 4
+CUDA_VISIBLE_DEVICES=0 python -m dualneuron.screening.run --model v4 --dataset imagenet --num_workers 4
+
+# DreamSim — build the ImageNet subset (ImageNet only), then embed
+python -m dualneuron.dream.subset --area v4
+CUDA_VISIBLE_DEVICES=1 python -m dualneuron.dream.sim --dataset rendered --area v4 --num_workers 4
+CUDA_VISIBLE_DEVICES=1 python -m dualneuron.dream.sim --dataset imagenet --area v4 --num_workers 4 \
+    --indices_path "$ANALYSIS_DIR/v4/v4_dreamsim_imagenet_indices.npy"
+
+# Similarity — Fig 6 + Fig 10
+python -m dualneuron.dream.similarity --model v4 --dataset rendered
+```
+
+Per-area transforms (crop, channels, grayscale, contrast norm) are set automatically from
+`--area`/`--model` — e.g. crop 200 (V4) / 167 (V1) so the RF mask aligns with the screening.
+
+### Saved-file layout (anticipated names)
+
+```
+ANALYSIS_DIR/
+├── v4/
+│   ├── v4_ensemble_rendered_ordered_{responses,indices}.npz   # screening (ensemble)
+│   ├── v4_ensemble_imagenet_ordered_{responses,indices}.npz
+│   ├── v4_member0_imagenet_ordered_{responses,indices}.npz    # single-member screening
+│   ├── v4_dreamsim_rendered_embeddings.npz                    # DreamSim (fp16, 1792-d)
+│   ├── v4_dreamsim_imagenet_embeddings.npz
+│   ├── v4_dreamsim_imagenet_indices.npy                       # ImageNet subset (subset.py)
+│   ├── v4_dreamsim_{rendered,imagenet}_results.npz            # similarity: per-neuron d-prime, R², skewness
+│   └── synthesis/
+│       └── v4_neuron{id:04d}.npz                              # MEI/LEI: image, alpha, activation × 10 seeds
+└── v1/                                                        # same scheme (grayscale, crop 167)
+```
+
+General scheme: `{area}_{run}_{dataset}_{kind}`, with `run ∈ {ensemble, member{i}}` and
+`dataset ∈ {rendered, imagenet}`. Logs mirror it under `LOGS_DIR/`
+(`{area}_{run}_{dataset}.log`, `{area}_synthesis.log`, `{area}_dreamsim_{dataset}.log`).
+
+### Equipment, concurrency, and observed times
+
+Hardware: 5 × 24 GB GPUs; a 100 GiB-RAM / 4-CPU-core cgroup. We run **one area per GPU** and use
+`--num_workers 4` — the data loaders are JPEG-decode-bound, so without workers the GPU starves
+and runtimes are ~4× longer.
+
+- **Screening (observed):** V4 rendered (200k, ensemble) ≈ **20 min**; V4 ImageNet (1.28M, ensemble,
+  4 workers) ≈ **1 h 9 min**; V1 ImageNet ≈ **1 h**; V4 ImageNet member-0 ≈ **1 h 9 min**.
+- **Synthesis (observed rates):** V4 ≈ 213 s/neuron, V1 ≈ 141 s/neuron at 10 seeds → ≈ **12–13 h**
+  (V4, 205 neurons) / ≈ **17 h** (V1, 445). Long runs are detached (`setsid`) to survive disconnects.
+- **DreamSim (observed):** rendered (200k, ensemble) ≈ **35–40 min** per area.
+
+**Concurrency — and a memory caveat we hit.** Two ImageNet screenings at once **OOM-killed** the
+cgroup: each streams ~140 GB of JPEGs into page cache, pushing past 100 GiB. So ImageNet runs are
+paced. The DreamSim rendered passes, by contrast, we ran **two areas concurrently** safely — but
+only after checking `memory.stat`: `memory.current` sits near 100 GiB because of **cold
+`inactive_file` cache** (~85 GiB), while real (anon) usage is only ~7 GiB. Judge headroom by the
+anon / inactive-file split in `memory.stat`, not the headline `memory.current`.
+
+### Status
+
+- **Done:** twins + inclusion; `sparse_split` (V4 160 non-sparse / 45 sparse; V1 312 / 133);
+  screening (ensemble V4+V1 rendered+ImageNet, V4 member-0 ImageNet); synthesis (V4+V1 MEIs/LEIs).
+- **In progress:** DreamSim rendered embeddings (V4, V1).
+- **To follow:** DreamSim ImageNet embeddings; `similarity.py` → Fig 6 + Fig 10 with the
+  R²-vs-sparsity spectrum; then Fig 2c (predicted vs recorded skewness), Fig 7 (test-set
+  verification), Fig 9 (baseline firing rate), Fig 11 (population shared selectivity), the
+  Fig 4/5 per-neuron panels, and Fig 8 (independent-evaluator / member cross-check).
 
 ## Data Availability
 

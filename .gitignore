@@ -38,3 +38,7 @@ wheels/
 .DS_Store
 Thumbs.db
 .env
+
+# Generated outputs (created on demand, not committed)
+figs/
+logs/

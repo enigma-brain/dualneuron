@@ -170,25 +170,30 @@ class ImagenetImages(Dataset):
         use_crop_to_mask=False,
         use_norm=False,
         use_clip=False,
+        use_experiment_frame=True,
         # Transform parameters
         mask=None,
         num_channels=None,
         output_size=(224, 224),
-        crop_size=236,
+        crop_size=200,
         bg_value=0.0,
         clip_min=0.0,
         clip_max=1.0,
         crop_padding_frac=0.1,
         norm=None,
+        img_mean=None,
+        img_std=None,
     ):
         """
         ImageNet dataset with flexible transform pipeline.
         
-        Base transforms (always applied):
+        Base transforms:
         1. EnsureRGB - Convert to RGB if needed
-        2. Resize(256) - Initial resize
-        
+        2. Frame: if use_experiment_frame, Resize(short->420) + CenterCrop((236,420))
+           to build the 236x420 experiment frame; else Resize(256)
+
         Optional transforms (controlled by use_* flags):
+        - use_experiment_frame: Build the 236x420 experiment frame instead of Resize(256)
         - use_center_crop: Apply CenterCrop(crop_size)
         - use_resize_output: Resize to output_size
         - use_grayscale: Convert to grayscale
@@ -208,14 +213,20 @@ class ImagenetImages(Dataset):
             use_mask: Whether to apply mask transform
             use_crop_to_mask: Whether to crop to mask bounding box and scale
             use_norm: Whether to apply norm transform
+            use_experiment_frame: If True (default), build the 236x420 experiment
+                frame (Resize short->420 + center-band crop) instead of Resize(256)
             mask: Mask array for MaskTransform (required if use_mask=True)
             num_channels: Number of output channels (auto-detected if None)
             output_size: Target size for resize (default: (224, 224))
             crop_size: Size for center crop (default: 236)
             bg_value: Background value for mask transform (default: 0.0)
             norm: Norm value for NormTransform (required if use_norm=True)
+            img_mean: Scalar mean (0-255 scale) for the twin's training z-score; if
+                set (with img_std), use_normalize applies (x - img_mean/255) /
+                (img_std/255) instead of ImageNet stats. Default: None.
+            img_std: Scalar std (0-255 scale) paired with img_mean. Default: None.
         """
-        
+
         # Create cache directory if it doesn't exist and was specified
         if data_dir is not None:
             os.makedirs(data_dir, exist_ok=True)
@@ -239,19 +250,27 @@ class ImagenetImages(Dataset):
         self.output_size = output_size
         self.crop_size = crop_size
         self.use_grayscale = use_grayscale
-        
+        self.img_mean = img_mean
+        self.img_std = img_std
+
         if num_channels is not None:
             self.num_channels = num_channels
         else:
             self.num_channels = 1 if use_grayscale else 3
-        
+
         # Build transform pipeline
         tlist = []
-        
-        # Base transforms (always applied)
+
+        # Base transforms
         tlist.append(EnsureRGB())
-        tlist.append(transforms.Resize(256))
-        
+        if use_experiment_frame:
+            # Build the 236x420 experiment frame: resize the short side to 420,
+            # then crop the center band.
+            tlist.append(transforms.Resize(420))
+            tlist.append(transforms.CenterCrop((236, 420)))
+        else:
+            tlist.append(transforms.Resize(256))
+
         # Optional transforms
         if use_center_crop:
             tlist.append(transforms.CenterCrop(crop_size))
@@ -289,15 +308,21 @@ class ImagenetImages(Dataset):
         self.transform = transforms.Compose(tlist)
     
     def get_normalization(self):
+        # Twin models were trained on images z-scored by a single scalar mean/std on a
+        # 0-255 scale (nnvision normalize_image). ToTensor yields [0,1], so the stats
+        # are divided by 255 and replicated across channels to reproduce training.
+        # Falls back to ImageNet stats when no twin stats are provided.
+        if self.img_mean is not None and self.img_std is not None:
+            mean = self.img_mean / 255.0
+            std = self.img_std / 255.0
+            return transforms.Normalize([mean] * self.num_channels, [std] * self.num_channels)
+
         mean = [0.485, 0.456, 0.406]
         std = [0.229, 0.224, 0.225]
-        
         if self.num_channels == 1:
             mean_gray = sum(mean) / 3
             std_gray = sum(std) / 3
-            return transforms.Normalize(
-                [mean_gray], [std_gray]
-            )
+            return transforms.Normalize([mean_gray], [std_gray])
         else:
             return transforms.Normalize(mean, std)
 
@@ -332,12 +357,14 @@ class RenderedImages(Dataset):
         mask=None,
         num_channels=None,
         output_size=(224, 224),
-        crop_size=236,
+        crop_size=200,
         bg_value=0.0,
         clip_min=0.0,
         clip_max=1.0,
         crop_padding_frac=0.1,
         norm=None,
+        img_mean=None,
+        img_std=None,
     ):
         """
         Rendered images dataset with flexible transform pipeline.
@@ -373,6 +400,10 @@ class RenderedImages(Dataset):
             bg_value: Background value for mask transform (default: 0.0)
             norm: Norm value for NormTransform (required if use_norm=True)
             crop_padding_frac: Padding fraction for CropToMask (default: 0.1)
+            img_mean: Scalar mean (0-255 scale) for the twin's training z-score; if
+                set (with img_std), use_normalize applies (x - img_mean/255) /
+                (img_std/255) instead of ImageNet stats. Default: None.
+            img_std: Scalar std (0-255 scale) paired with img_mean. Default: None.
         """
         
         # Source can be either a directory of loose PNGs, or the Dryad rendered
@@ -396,15 +427,17 @@ class RenderedImages(Dataset):
         self.output_size = output_size
         self.crop_size = crop_size
         self.use_grayscale = use_grayscale
-        
+        self.img_mean = img_mean
+        self.img_std = img_std
+
         if num_channels is not None:
             self.num_channels = num_channels
         else:
             self.num_channels = 1 if use_grayscale else 3
-        
+
         # Build transform pipeline
         tlist = []
-        
+
         # Optional PIL transforms (before ToTensor)
         if use_center_crop:
             tlist.append(transforms.CenterCrop(crop_size))
@@ -444,9 +477,17 @@ class RenderedImages(Dataset):
     
     def get_normalization(self):
         """Get appropriate normalization transform"""
+        # Twin models were trained on images z-scored by a single scalar mean/std on a
+        # 0-255 scale (nnvision normalize_image). ToTensor yields [0,1], so the stats
+        # are divided by 255 and replicated across channels to reproduce training.
+        # Falls back to ImageNet stats when no twin stats are provided.
+        if self.img_mean is not None and self.img_std is not None:
+            mean = self.img_mean / 255.0
+            std = self.img_std / 255.0
+            return transforms.Normalize([mean] * self.num_channels, [std] * self.num_channels)
+
         mean = [0.485, 0.456, 0.406]
         std = [0.229, 0.224, 0.225]
-        
         if self.num_channels == 1:  # grayscale
             mean_gray = sum(mean) / 3
             std_gray = sum(std) / 3

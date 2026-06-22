@@ -165,13 +165,115 @@ def create_crops(
     )
 
     crops = F.interpolate(
-        crops_hi, 
+        crops_hi,
         size=(input_size, input_size),
-        mode="bicubic", 
-        align_corners=False, 
+        mode="bicubic",
+        align_corners=False,
         antialias=True
     )
     return crops
+
+
+def create_neural_crops(
+    image, mu, nb_crops, box_size, input_size,
+    jitter_std=0.05,
+    oversample=1,
+    reflect_pad_frac=0.05,
+):
+    """
+    Receptive-field-aware crops for activation maximization.
+
+    Identical to create_crops, except the crops are centered on the neuron's
+    receptive-field center (the Gaussian readout center, mu) instead of the image
+    center. box_size and jitter_std are absolute fractions of the image, exactly as
+    in create_crops; only the anchor point moves. For a centered readout (mu = 0)
+    this reduces to create_crops.
+
+    The readout center is the only per-neuron quantity used: the readout sigma is a
+    near-point pooling spread on the feature map, not the image-space receptive field
+    size (which is set by the fixed convolutional receptive field of the core), so a
+    single absolute box_size applies to all neurons.
+
+    Args:
+        image (torch.Tensor): Input image, shape (C, H, W).
+        mu (sequence or torch.Tensor): RF center in normalized grid coordinates
+            [-1, 1], order (x, y) = (width, height), as stored in FullGaussian2d.mu.
+        nb_crops (int): Number of crops to generate.
+        box_size (float or tuple): Crop size as a fraction of the image. A scalar
+            gives a fixed size; a (min, max) tuple samples a per-crop scale.
+        input_size (int): Output size for each crop (square).
+        jitter_std (float): Std of crop-center jitter, as a fraction of the image.
+            Default: 0.05.
+        oversample (int): Oversampling factor before downscaling. Default: 1.
+        reflect_pad_frac (float): Fraction of image size to reflect-pad. Default: 0.05.
+
+    Returns:
+        tuple: (crops, boxes)
+            - crops (torch.Tensor): shape (nb_crops, C, input_size, input_size).
+            - boxes (torch.Tensor): shape (nb_crops, 4), crop boxes (x1, y1, x2, y2)
+              in original-image pixel coordinates, for visualization.
+    """
+    assert image.ndim == 3
+    device = image.device
+    C, H, W = image.shape
+
+    # RF center: normalized [-1, 1] (x, y) -> fractional [0, 1].
+    mu = torch.as_tensor(mu, dtype=torch.float32, device=device).flatten()
+    cx0 = (float(mu[0]) + 1.0) * 0.5
+    cy0 = (float(mu[1]) + 1.0) * 0.5
+
+    if isinstance(box_size, (tuple, list)):
+        s, b = box_size
+    else:
+        s = b = box_size
+
+    pad = int(reflect_pad_frac * min(H, W))
+    if pad > 0:
+        img_pad = F.pad(
+            image.unsqueeze(0),
+            (pad, pad, pad, pad),
+            mode="reflect"
+        ).squeeze(0)
+        Hpad, Wpad = H + 2 * pad, W + 2 * pad
+        x_offset = pad
+        y_offset = pad
+    else:
+        img_pad = image
+        Hpad, Wpad = H, W
+        x_offset = 0
+        y_offset = 0
+
+    # Crop centers: RF center (mu) + jitter; crop scale; all as image fractions.
+    cx = cx0 + torch.randn(nb_crops, device=device) * jitter_std
+    cy = cy0 + torch.randn(nb_crops, device=device) * jitter_std
+    sc = torch.rand(nb_crops, device=device) * (b - s) + s
+    bw, bh = sc * W, sc * H
+
+    x1 = (cx * W + x_offset - 0.5 * bw).clamp(0, Wpad)
+    y1 = (cy * H + y_offset - 0.5 * bh).clamp(0, Hpad)
+    x2 = (cx * W + x_offset + 0.5 * bw).clamp(0, Wpad)
+    y2 = (cy * H + y_offset + 0.5 * bh).clamp(0, Hpad)
+    batch = torch.zeros_like(x1)
+    boxes_roi = torch.stack([batch, x1, y1, x2, y2], dim=1).to(torch.float32)
+
+    hi = input_size * max(1, int(oversample))
+    crops_hi = roi_align(
+        img_pad.unsqueeze(0),
+        boxes_roi,
+        output_size=(hi, hi),
+        aligned=True
+    )
+    crops = F.interpolate(
+        crops_hi,
+        size=(input_size, input_size),
+        mode="bicubic",
+        align_corners=False,
+        antialias=True
+    )
+
+    # Boxes in original-image coordinates (undo padding offset) for visualization.
+    boxes = torch.stack([x1, y1, x2, y2], dim=1) - x_offset
+    return crops, boxes
 
 
 def add_noise(image, noise_level):

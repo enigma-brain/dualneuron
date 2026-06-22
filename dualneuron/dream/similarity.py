@@ -3,8 +3,8 @@ DreamSim similarity analyses relating each neuron's most/least activating images
 to its predicted activity (paper Figs 6 and 10).
 
 Both analyses operate on DreamSim embeddings (from dualneuron.dream.sim.embeddings)
-and the per-neuron ordered responses/indices produced by screening (the Dryad
-{area}_{dataset}_ordered_{responses,indices}.npz files, keyed unit_{id}). The
+and the per-neuron ordered responses/indices produced by screening (the
+{area}_ensemble_{dataset}_ordered_{responses,indices}.npz files, keyed unit_{id}). The
 ensemble DreamSim embeddings are L2-normalized, so cosine similarity is just the
 dot product.
 
@@ -271,24 +271,34 @@ if __name__ == "__main__":
     import argparse
     from dotenv import load_dotenv
     load_dotenv()
+    from dualneuron.utils import env_dir
 
-    DATA_DIR = os.getenv("DATA_DIR")
+    ANALYSIS_DIR = env_dir("ANALYSIS_DIR")
     parser = argparse.ArgumentParser(description="DreamSim coherence (Fig 6) and 2D similarity space (Fig 10)")
-    parser.add_argument("--embeddings", type=str, required=True,
-                        help="npz with 'embeddings' and 'indices' (from dream.sim.embeddings)")
+    parser.add_argument("--embeddings", type=str, default=None,
+                        help="npz with 'embeddings' and 'indices' (default ANALYSIS_DIR/{model}/{model}_dreamsim_{dataset}_embeddings.npz)")
     parser.add_argument("--model", type=str, default="v4", help="v1 or v4")
     parser.add_argument("--dataset", type=str, default="rendered", help="rendered or imagenet")
-    parser.add_argument("--dryad_dir", type=str, default=None,
-                        help="dir with {model}_{dataset}_ordered_{responses,indices}.npz (default DATA_DIR/dryad)")
+    parser.add_argument("--analysis_dir", type=str, default=None,
+                        help="dir with {model}_ensemble_{dataset}_ordered_{responses,indices}.npz (default ANALYSIS_DIR/{model})")
     parser.add_argument("--output", type=str, default=None, help="npz to save the results")
     parser.add_argument("--seed", type=int, default=0, help="RNG seed for random references")
     args = parser.parse_args()
 
-    dryad_dir = args.dryad_dir or os.path.join(DATA_DIR, "dryad")
-    emb = np.load(args.embeddings)
+    if ANALYSIS_DIR is None and (args.analysis_dir is None or args.embeddings is None):
+        raise ValueError(
+            "ANALYSIS_DIR is not set. Set it in .env (e.g. "
+            "ANALYSIS_DIR=${DATA_DIR}/DUAL-FEATURE-ANALYSIS) or pass "
+            "--analysis_dir and --embeddings explicitly."
+        )
+    analysis_dir = args.analysis_dir or os.path.join(ANALYSIS_DIR, args.model)
+    emb_path = args.embeddings or os.path.join(
+        ANALYSIS_DIR, args.model, f"{args.model}_dreamsim_{args.dataset}_embeddings.npz"
+    )
+    emb = np.load(emb_path)
     embeddings, indices = emb["embeddings"], emb["indices"]
-    ordered_responses = np.load(os.path.join(dryad_dir, f"{args.model}_{args.dataset}_ordered_responses.npz"))
-    ordered_indices = np.load(os.path.join(dryad_dir, f"{args.model}_{args.dataset}_ordered_indices.npz"))
+    ordered_responses = np.load(os.path.join(analysis_dir, f"{args.model}_ensemble_{args.dataset}_ordered_responses.npz"))
+    ordered_indices = np.load(os.path.join(analysis_dir, f"{args.model}_ensemble_{args.dataset}_ordered_indices.npz"))
 
     coh = coherence_dprime(embeddings, indices, ordered_responses, ordered_indices, seed=args.seed)
     sp = similarity_space_2d(embeddings, indices, ordered_responses, ordered_indices, seed=args.seed)
