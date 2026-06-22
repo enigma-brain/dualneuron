@@ -287,21 +287,11 @@ if __name__ == "__main__":
     parser.add_argument("--num_workers", type=int, default=0, help="number of workers for dataloader")
     parser.add_argument("--log_path", type=str, default=None, help="Progress log file (default LOGS_DIR/{area}_dreamsim_{dataset}.log)")
     parser.add_argument("--log_every", type=float, default=30.0, help="Min seconds between progress-line updates")
-    parser.add_argument("--limit", type=int, default=None, help="Embed only the first N images (quick sanity/timing run)")
-    parser.add_argument("--indices_path", type=str, default=None, help="Path to a .npy of dataset indices to embed (e.g. the imagenet subset); overrides --limit")
+    parser.add_argument("--indices_path", type=str, default=None, help="Path to a .npy of dataset indices to embed (e.g. the imagenet subset); default embeds all")
     args = parser.parse_args()
 
-    # Subset to embed: an explicit index file (e.g. the imagenet subset), else a
-    # first-N quick pass, else the full dataset.
-    if args.indices_path is not None:
-        indices = np.load(args.indices_path)
-        suffix = ""
-    elif args.limit is not None:
-        indices = np.arange(args.limit)
-        suffix = f"_first{args.limit}"
-    else:
-        indices = None
-        suffix = ""
+    # Subset to embed: an explicit index file (e.g. the imagenet subset), else all images.
+    indices = np.load(args.indices_path) if args.indices_path is not None else None
 
     # Default image source by dataset (RENDERED_DIR / IMAGENET_CACHE_DIR).
     data_dir = args.data_dir
@@ -323,14 +313,14 @@ if __name__ == "__main__":
             )
         output_path = os.path.join(
             ANALYSIS_DIR, args.area,
-            f"{args.area}_dreamsim_{args.dataset}_embeddings{suffix}.npz",
+            f"{args.area}_dreamsim_{args.dataset}_embeddings.npz",
         )
 
     log_path = args.log_path
     if log_path is None:
         logs_dir = os.getenv("LOGS_DIR")
         if logs_dir is not None:
-            log_path = os.path.join(logs_dir, f"{args.area}_dreamsim_{args.dataset}{suffix}.log")
+            log_path = os.path.join(logs_dir, f"{args.area}_dreamsim_{args.dataset}.log")
 
     embeddings(
         data_dir=data_dir,
