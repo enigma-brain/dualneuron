@@ -323,7 +323,9 @@ dualneuron/
 │   └── axis.py            # Semantic axis computation (synthesis guidance)
 │
 └── figures/                # Paper figure generation
-    └── make_fig_dreamsim.py  # Fig 6 (coherence d-prime) + Fig 10 (2D similarity space)
+    ├── neuron_strips.py       # MAI/LAI natural-image strips per neuron (across sparsity)
+    ├── make_fig_mei_lei.py    # Synthesized LEI/MEI seed strips per neuron (blend)
+    └── make_fig_dreamsim.py   # Fig 6 (coherence d-prime) + Fig 10 (2D similarity space)
 ```
 
 ## Reproducing the paper — pipeline, runs, and status

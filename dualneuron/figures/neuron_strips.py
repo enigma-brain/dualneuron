@@ -8,8 +8,8 @@ activating (MAI), ordered low->high activation, receptive-field masked at bg=0.5
 (screening geometry, no z-score / no L2 so the natural image shows). The response
 range of each row is annotated at its right edge.
 
-    python tests/neuron_strips.py                 # all four (v4/v1 x rendered/imagenet)
-    python tests/neuron_strips.py --area v4 --dataset rendered
+    python -m dualneuron.figures.neuron_strips                 # all four (v4/v1 x rendered/imagenet)
+    python -m dualneuron.figures.neuron_strips --area v4 --dataset rendered
 """
 import os
 import argparse
@@ -25,7 +25,7 @@ import dualneuron
 from dualneuron.screening.sets import ImagenetImages, RenderedImages
 from dualneuron.utils import ensure_dir, env_dir, sparse_split
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(REPO_ROOT / ".env")
 
 ANALYSIS_DIR = env_dir("ANALYSIS_DIR")
