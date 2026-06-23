@@ -360,10 +360,15 @@ The analyses form one dependency chain; each stage's output feeds the next:
    each neuron's **skewness** so R²/d-prime form a continuous spectrum across sparsity (skewness =
    2 is only a soft boundary; `utils.sparse_split`). The linear model is CV-validated — a degree-2
    surface adds only a median ~1% R². V4 non-sparse R² ≈ 0.28 (rendered), matching Franke's 0.23.
-6. **Figures** (`figures/make_fig_dreamsim.py`). Renders Fig 6 (population coherence distributions
-   + d-prime scatter) and Fig 10 (example 2D spaces with the activity-gradient arrow and its 1D
-   projection, the R² histogram, and the R²-vs-control scatter) for both areas × datasets into
-   `PAPER_FIG_DIR`.
+   ImageNet is **our extension** (Franke reports rendered only); its R² is computed over the
+   embedded subset (the constant ~205k/209k set), not all of ImageNet-1k.
+6. **Figures** (`figures/`). `make_fig_dreamsim.py` → Fig 6 (population coherence distributions +
+   d-prime scatter) and Fig 10 (example 2D spaces with the activity-gradient arrow and its 1D
+   projection, the R² histogram, and the R²-vs-control scatter), both areas × datasets.
+   `neuron_strips.py` → per-area MAI/LAI natural-image strips across the sparsity range (the same
+   four neurons per area: 4, 5, most non-sparse, most sparse), and `make_fig_mei_lei.py` → the
+   synthesized LEI/MEI seed strips for those same neurons (`synthesis.visualize.blend`). These
+   serve the Figs 3–5 examples. All write PDFs to `PAPER_FIG_DIR`.
 
 ### Paper → code
 
@@ -372,6 +377,7 @@ The analyses form one dependency chain; each stage's output feeds the next:
 | Fig 1 — twins + inclusion (corr-to-avg > 0.4) | `twins/nets.py`, `utils.well_predicted_neurons` |
 | Fig 2 — sparseness (skewness < 2) | `utils.sparse_split` (on the ImageNet screening) |
 | Figs 3–5 — MEIs/LEIs + MAIs/LAIs | `synthesis/generate.py` + `screening/run.py` |
+| Figs 3–5 — plotting (MAI/LAI + LEI/MEI strips) | `figures/neuron_strips.py` + `figures/make_fig_mei_lei.py` |
 | RF mask (shared by screening + DreamSim) | `synthesis/mask.py` |
 | Fig 6 — DreamSim d-prime | `dream/sim.py` + `dream/similarity.py` |
 | Fig 10 — 2D similarity space, R² vs. sparsity | `dream/similarity.py` |
@@ -403,12 +409,16 @@ CUDA_VISIBLE_DEVICES=1 python -m dualneuron.dream.sim --dataset imagenet --area 
 # Similarity — Fig 6 + Fig 10 (per model × dataset; saves {model}_similarity_{dataset}.npz)
 python -m dualneuron.dream.similarity --model v4 --dataset rendered --output "$ANALYSIS_DIR/v4/v4_similarity_rendered.npz"
 
-# Figures — Fig 6 + Fig 10 for both areas × datasets, into PAPER_FIG_DIR
-python -m dualneuron.figures.make_fig_dreamsim
+# Figures — into PAPER_FIG_DIR
+python -m dualneuron.figures.make_fig_dreamsim      # Fig 6 + Fig 10 (both areas × datasets)
+python -m dualneuron.figures.neuron_strips          # MAI/LAI strips (both areas × datasets)
+python -m dualneuron.figures.make_fig_mei_lei       # synthesized LEI/MEI seed strips (both areas)
 ```
 
-Per-area transforms (crop, channels, grayscale, contrast norm) are set automatically from
-`--area`/`--model` — e.g. crop 200 (V4) / 167 (V1) so the RF mask aligns with the screening.
+The commands above show V4; repeat screening, DreamSim, and similarity with `--area v1` /
+`--model v1` (and `--dataset imagenet`) for the full set. Per-area transforms (crop, channels,
+grayscale, contrast norm) are set automatically from `--area`/`--model` — e.g. crop 200 (V4) /
+167 (V1) so the RF mask aligns with the screening.
 
 ### Saved-file layout (anticipated names)
 
@@ -463,7 +473,8 @@ anon / inactive-file split in `memory.stat`, not the headline `memory.current`.
   RF masks reproduced from the MEIs/LEIs (`synthesis/mask.py`, corr 0.996 V4 / 0.992 V1); DreamSim
   embeddings (V4+V1, rendered+ImageNet); similarity (`dream/similarity.py`) → Fig 6 d-prime + Fig 10
   R² with centered embeddings, ddof-1 d-prime, 15-image poles and degree-1 controls; figures
-  (`figures/make_fig_dreamsim.py`). The 2D similarity-space model is CV-validated as linear
+  (`figures/`: `make_fig_dreamsim` Fig 6/10, `neuron_strips` MAI/LAI strips, `make_fig_mei_lei`
+  LEI/MEI seed strips). The 2D similarity-space model is CV-validated as linear
   (degree-2 adds a median ~1% R²), and V4 non-sparse R² ≈ 0.28 (rendered) matches Franke's 0.23.
 - **To follow:** Fig 2c (predicted vs recorded skewness), Fig 7 (test-set verification), Fig 9
   (baseline firing rate), Fig 11 (population shared selectivity), the Fig 4/5 per-neuron panels,
