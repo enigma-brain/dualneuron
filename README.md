@@ -311,32 +311,37 @@ dualneuron/
 ├── synthesis/              # Stimulus optimization (MEIs/LEIs)
 │   ├── ascend.py          # Fourier (V4) & pixel (V1) gradient ascent
 │   ├── generate.py        # Per-neuron MEI/LEI generation (resumable)
+│   ├── mask.py            # Build the RF mask from the MEIs/LEIs -> twins/{model}/mask.npy
 │   ├── ops.py             # Image ops (create_crops, create_neural_crops, norm, ...)
 │   ├── visualize.py       # Optimization trajectory visualization
 │   └── priors/            # Natural image magnitude spectra (natural_{gray,rgb}.npy)
 │
-└── dream/                  # DreamSim embedding analysis
-    ├── sim.py             # DreamSim embedding extraction (fp16, per-area defaults)
-    ├── subset.py          # Build the per-area ImageNet embedding subset
-    ├── similarity.py      # MAI/LAI coherence d-prime (Fig 6), 2D similarity space (Fig 10)
-    └── axis.py            # Semantic axis computation (synthesis guidance)
+├── dream/                  # DreamSim embedding analysis
+│   ├── sim.py             # DreamSim embedding extraction (fp16, per-area defaults)
+│   ├── subset.py          # Build the per-area ImageNet embedding subset
+│   ├── similarity.py      # MAI/LAI coherence d-prime (Fig 6), 2D similarity space (Fig 10)
+│   └── axis.py            # Semantic axis computation (synthesis guidance)
+│
+└── figures/                # Paper figure generation
+    └── make_fig_dreamsim.py  # Fig 6 (coherence d-prime) + Fig 10 (2D similarity space)
 ```
 
 ## Reproducing the paper — pipeline, runs, and status
 
 The analyses form one dependency chain; each stage's output feeds the next:
 
-**synthesis → acquire mask → screening → DreamSim → similarity (d-prime + R² vs. sparsity)**
+**synthesis → acquire mask → screening → DreamSim → similarity (d-prime + R² vs. sparsity) → figures**
 
 1. **Synthesis** (`synthesis/`). Gradient ascent on the centered ensemble twins produces,
    per well-predicted neuron, a most-exciting input (MEI) and a least-exciting input (LEI):
    V4 in the Fourier phase domain (`fourier_ascending`, natural-amplitude prior), V1 in
    pixels (`pixel_ascending`), 10 seeds each, ℓ2-constrained (40 V4 / 12 V1). One npz per neuron.
-2. **Acquire mask.** Each area's receptive-field mask is the **mean over its synthesized
-   MEIs/LEIs**, with a Gaussian-softened boundary (no hard edge). Stored at
+2. **Acquire mask** (`synthesis/mask.py`). Each area's receptive-field mask is built from the
+   **mean alpha over all its synthesized MEIs/LEIs**: threshold at the ~77.5th percentile (the
+   RF core), then Gaussian-soften the binary edge (σ ≈ 1.3). Stored at
    `dualneuron/twins/{model}/mask.npy`, it is the shared input to both screening and DreamSim,
-   so each evaluates exactly the retinotopic region its neuron drives. (The shipped masks were
-   acquired this way from the published MEIs/LEIs.)
+   so each evaluates exactly the retinotopic region its neuron drives. The script reproduces the
+   shipped masks (correlation 0.996 V4 / 0.992 V1; only a ~1-px edge ring differs).
 3. **Screening** (`screening/`). Every image is RF-masked (bg 0) and ℓ2-normalized, run through
    the twins, and sorted per neuron to give MAIs/LAIs. Sources: 200,000 rendered scenes and the
    full 1,281,167 ImageNet-1k train images. Use the **ensemble** (default) or a single
@@ -345,11 +350,18 @@ The analyses form one dependency chain; each stage's output feeds the next:
    bg 0.45), contrast-normalized, and embedded into the 1792-d DreamSim ensemble space
    (penultimate layer, unit-norm, fp16). Rendered = all 200k; ImageNet = a subset from
    `subset.py` (every neuron's K=15 MAIs+LAIs ∪ a 200k uniform sample), passed via `--indices_path`.
-5. **Similarity** (`dream/similarity.py`). From the embeddings + the screening order:
-   **Fig 6 d-prime** (within-MAI / within-LAI cosine coherence vs. random) and **Fig 10 2D
-   similarity space** (each image's similarity to a neuron's MAI/LAI → linear-fit R²), run over
-   **all** well-predicted neurons and related to each neuron's **skewness** so R²/d-prime form a
-   continuous spectrum across sparsity (skewness = 2 is only a soft boundary; `utils.sparse_split`).
+5. **Similarity** (`dream/similarity.py`). Embeddings are **globally centered** before every
+   cosine (à la Franke — this removes the common-mode and is what gives d-prime/R² their range).
+   **Fig 6 d-prime** (within-MAI / within-LAI cosine coherence vs. random, ddof = 1) and **Fig 10
+   2D similarity space** (each image's mean cosine to a neuron's 15 MAI / 15 LAI poles → degree-1
+   linear-fit R², with random-pole controls), over **all** well-predicted neurons and related to
+   each neuron's **skewness** so R²/d-prime form a continuous spectrum across sparsity (skewness =
+   2 is only a soft boundary; `utils.sparse_split`). The linear model is CV-validated — a degree-2
+   surface adds only a median ~1% R². V4 non-sparse R² ≈ 0.28 (rendered), matching Franke's 0.23.
+6. **Figures** (`figures/make_fig_dreamsim.py`). Renders Fig 6 (population coherence distributions
+   + d-prime scatter) and Fig 10 (example 2D spaces with the activity-gradient arrow and its 1D
+   projection, the R² histogram, and the R²-vs-control scatter) for both areas × datasets into
+   `PAPER_FIG_DIR`.
 
 ### Paper → code
 
@@ -358,8 +370,10 @@ The analyses form one dependency chain; each stage's output feeds the next:
 | Fig 1 — twins + inclusion (corr-to-avg > 0.4) | `twins/nets.py`, `utils.well_predicted_neurons` |
 | Fig 2 — sparseness (skewness < 2) | `utils.sparse_split` (on the ImageNet screening) |
 | Figs 3–5 — MEIs/LEIs + MAIs/LAIs | `synthesis/generate.py` + `screening/run.py` |
+| RF mask (shared by screening + DreamSim) | `synthesis/mask.py` |
 | Fig 6 — DreamSim d-prime | `dream/sim.py` + `dream/similarity.py` |
 | Fig 10 — 2D similarity space, R² vs. sparsity | `dream/similarity.py` |
+| Figs 6 & 10 — plotting | `figures/make_fig_dreamsim.py` |
 
 ### Commands (install → analysis)
 
@@ -369,6 +383,10 @@ uv sync                                    # env + GPU torch (cu121)
 # Synthesis — one area per GPU; resumable
 CUDA_VISIBLE_DEVICES=0 python -m dualneuron.synthesis.generate --area v4
 CUDA_VISIBLE_DEVICES=1 python -m dualneuron.synthesis.generate --area v1
+
+# Acquire mask — from the synthesized MEIs/LEIs (-> twins/{model}/mask.npy; prints corr vs shipped)
+python -m dualneuron.synthesis.mask --area v4
+python -m dualneuron.synthesis.mask --area v1
 
 # Screening — ensemble (drop --member); a single member with --member i
 CUDA_VISIBLE_DEVICES=0 python -m dualneuron.screening.run --model v4 --dataset rendered --num_workers 4
@@ -380,8 +398,11 @@ CUDA_VISIBLE_DEVICES=1 python -m dualneuron.dream.sim --dataset rendered --area 
 CUDA_VISIBLE_DEVICES=1 python -m dualneuron.dream.sim --dataset imagenet --area v4 --num_workers 4 \
     --indices_path "$ANALYSIS_DIR/v4/v4_dreamsim_imagenet_indices.npy"
 
-# Similarity — Fig 6 + Fig 10
-python -m dualneuron.dream.similarity --model v4 --dataset rendered
+# Similarity — Fig 6 + Fig 10 (per model × dataset; saves {model}_similarity_{dataset}.npz)
+python -m dualneuron.dream.similarity --model v4 --dataset rendered --output "$ANALYSIS_DIR/v4/v4_similarity_rendered.npz"
+
+# Figures — Fig 6 + Fig 10 for both areas × datasets, into PAPER_FIG_DIR
+python -m dualneuron.figures.make_fig_dreamsim
 ```
 
 Per-area transforms (crop, channels, grayscale, contrast norm) are set automatically from
@@ -398,11 +419,15 @@ ANALYSIS_DIR/
 │   ├── v4_dreamsim_rendered_embeddings.npz                    # DreamSim (fp16, 1792-d)
 │   ├── v4_dreamsim_imagenet_embeddings.npz
 │   ├── v4_dreamsim_imagenet_indices.npy                       # ImageNet subset (subset.py)
-│   ├── v4_dreamsim_{rendered,imagenet}_results.npz            # similarity: per-neuron d-prime, R², skewness
+│   ├── v4_similarity_{rendered,imagenet}.npz                  # similarity: per-neuron d-prime, R², controls, skewness
 │   └── synthesis/
 │       └── v4_neuron{id:04d}.npz                              # MEI/LEI: image, alpha, activation × 10 seeds
 └── v1/                                                        # same scheme (grayscale, crop 167)
 ```
+
+The RF mask is written back to `dualneuron/twins/{model}/mask.npy` (`synthesis/mask.py`), and the
+Fig 6 / Fig 10 PDFs to `PAPER_FIG_DIR` (`dreamsim_dprime_{dataset}.pdf`,
+`dreamsim_similarity_{area}_{dataset}.pdf`, plus the `mask_reconstruction.pdf` QC).
 
 General scheme: `{area}_{run}_{dataset}_{kind}`, with `run ∈ {ensemble, member{i}}` and
 `dataset ∈ {rendered, imagenet}`. Logs mirror it under `LOGS_DIR/`
@@ -418,7 +443,9 @@ and runtimes are ~4× longer.
   4 workers) ≈ **1 h 9 min**; V1 ImageNet ≈ **1 h**; V4 ImageNet member-0 ≈ **1 h 9 min**.
 - **Synthesis (observed rates):** V4 ≈ 213 s/neuron, V1 ≈ 141 s/neuron at 10 seeds → ≈ **12–13 h**
   (V4, 205 neurons) / ≈ **17 h** (V1, 445). Long runs are detached (`setsid`) to survive disconnects.
-- **DreamSim (observed):** rendered (200k, ensemble) ≈ **35–40 min** per area.
+- **DreamSim (observed):** rendered (200k, ensemble) ≈ **35–40 min** per area; ImageNet subset
+  (~205k V4 / ~209k V1) ≈ **45–47 min** per area. **Similarity** (`similarity.py`) is CPU-only,
+  ≈ **2–4 min** per model × dataset; **mask** (`synthesis/mask.py`) ≈ **15–20 s** per area.
 
 **Concurrency — and a memory caveat we hit.** Two ImageNet screenings at once **OOM-killed** the
 cgroup: each streams ~140 GB of JPEGs into page cache, pushing past 100 GiB. So ImageNet runs are
@@ -430,12 +457,15 @@ anon / inactive-file split in `memory.stat`, not the headline `memory.current`.
 ### Status
 
 - **Done:** twins + inclusion; `sparse_split` (V4 160 non-sparse / 45 sparse; V1 312 / 133);
-  screening (ensemble V4+V1 rendered+ImageNet, V4 member-0 ImageNet); synthesis (V4+V1 MEIs/LEIs).
-- **In progress:** DreamSim rendered embeddings (V4, V1).
-- **To follow:** DreamSim ImageNet embeddings; `similarity.py` → Fig 6 + Fig 10 with the
-  R²-vs-sparsity spectrum; then Fig 2c (predicted vs recorded skewness), Fig 7 (test-set
-  verification), Fig 9 (baseline firing rate), Fig 11 (population shared selectivity), the
-  Fig 4/5 per-neuron panels, and Fig 8 (independent-evaluator / member cross-check).
+  screening (ensemble V4+V1 rendered+ImageNet, V4 member-0 ImageNet); synthesis (V4+V1 MEIs/LEIs);
+  RF masks reproduced from the MEIs/LEIs (`synthesis/mask.py`, corr 0.996 V4 / 0.992 V1); DreamSim
+  embeddings (V4+V1, rendered+ImageNet); similarity (`dream/similarity.py`) → Fig 6 d-prime + Fig 10
+  R² with centered embeddings, ddof-1 d-prime, 15-image poles and degree-1 controls; figures
+  (`figures/make_fig_dreamsim.py`). The 2D similarity-space model is CV-validated as linear
+  (degree-2 adds a median ~1% R²), and V4 non-sparse R² ≈ 0.28 (rendered) matches Franke's 0.23.
+- **To follow:** Fig 2c (predicted vs recorded skewness), Fig 7 (test-set verification), Fig 9
+  (baseline firing rate), Fig 11 (population shared selectivity), the Fig 4/5 per-neuron panels,
+  and Fig 8 (independent-evaluator / member cross-check).
 
 ## Data Availability
 
