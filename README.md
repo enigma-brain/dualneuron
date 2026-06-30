@@ -63,6 +63,11 @@ uv sync
 source .venv/bin/activate
 ```
 
+> **Use `uv sync`.** `nnfabrik` (pinned to 0.2.2) imports `from datajoint.schemas import
+> Schema`, which DataJoint removed in 2.2, so the twins fail to import on DataJoint ≥ 2.2. The
+> lockfile pins `datajoint<2.2` (resolves to 2.1.1) to avoid this. If you install dependencies
+> manually instead of via `uv sync`, keep that constraint: `pip install "datajoint<2.2"`.
+
 ## Configuration
 
 Create a `.env` file in the repository root (copy `.env.example`):
