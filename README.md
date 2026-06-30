@@ -76,6 +76,7 @@ HF_TOKEN=your_huggingface_token                 # Hugging Face token (to downloa
 DATA_DIR=/path/to/your/data                     # Root data directory (see layout below)
 IMAGENET_CACHE_DIR=${DATA_DIR}/datasets         # Hugging Face ImageNet cache
 RENDERED_DIR=${DATA_DIR}/datasets/rendered      # Rendered-scene archives (batch_*.zip)
+EXPERIMENT_DIR=${DATA_DIR}/datasets/experiment  # Recordings (all_trials/) + stimuli (images_all_types/)
 MODELS_DIR=${DATA_DIR}/models                   # Cached model weights (e.g. DreamSim)
 ANALYSIS_DIR=${DATA_DIR}/DUAL-FEATURE-ANALYSIS  # Regenerated screening/synthesis/DreamSim outputs
 LOGS_DIR=./logs                                 # Progress logs (one self-rewriting line per run)
@@ -91,7 +92,10 @@ and the Dryad data live:
 ```
 DATA_DIR/
 ├── datasets/                  # Hugging Face ImageNet cache (IMAGENET_CACHE_DIR)
-│   └── rendered/              # rendered-scene archives batch_*.zip (RENDERED_DIR)
+│   ├── rendered/              # rendered-scene archives batch_*.zip (RENDERED_DIR)
+│   └── experiment/            # the experiment dataset (EXPERIMENT_DIR)
+│       ├── all_trials/        #   recorded V4 session pickles (CSRF19_V4_*.pickle)
+│       └── images_all_types/  #   presented stimuli, {id:06d}.npy
 ├── models/                    # cached model weights, e.g. DreamSim (MODELS_DIR)
 ├── DUAL-FEATURE-ANALYSIS/     # regenerated outputs (ANALYSIS_DIR); see "Saved-file layout"
 │   ├── v4/
@@ -319,20 +323,37 @@ dualneuron/
 ├── dream/                  # DreamSim embedding analysis
 │   ├── sim.py             # DreamSim embedding extraction (fp16, per-area defaults)
 │   ├── subset.py          # Build the per-area ImageNet embedding subset
-│   ├── similarity.py      # MAI/LAI coherence d-prime (Fig 6), 2D similarity space (Fig 10)
+│   ├── similarity.py      # MAI/LAI coherence d-prime (Fig 6), 2D similarity space (Fig 9)
 │   └── axis.py            # Semantic axis computation (synthesis guidance)
 │
-└── figures/                # Paper figure generation
-    ├── neuron_strips.py       # MAI/LAI natural-image strips per neuron (across sparsity)
-    ├── make_fig_mei_lei.py    # Synthesized LEI/MEI seed strips per neuron (blend)
-    └── make_fig_dreamsim.py   # Fig 6 (coherence d-prime) + Fig 10 (2D similarity space)
+├── data/                   # Recorded neuronal data (macaque V4; there are no V1 recordings)
+│   └── recordings.py      # load_sessions / build_response_matrix / recorded_responses;
+│                          #   reads EXPERIMENT_DIR/all_trials; SESSION_ORDER aligns neurons to
+│                          #   correlations.npy (sum time-bins 2:, mean over repeats)
+│
+└── figures/                # Paper figure generation (PDFs -> PAPER_FIG_DIR)
+    ├── make_fig_accuracy.py     # Fig 1c  — prediction accuracy (single-trial + corr-to-avg, 0.4)
+    ├── make_fig_sparsity.py     # Fig 2   — skewness continuum (model vs recorded, distribution)
+    ├── neuron_strips.py         # Figs 4-5 — MAI/LAI natural-image strips per neuron
+    ├── make_fig_mei_lei.py      # Figs 4-5 — synthesized LEI/MEI seed strips per neuron (blend)
+    ├── make_fig_dreamsim.py     # Fig 6 (coherence d-prime) + Fig 9 (2D similarity space)
+    ├── make_fig_verify_data.py  # Fig 7   — recorded-response percentile verification
+    ├── make_fig_population.py   # Fig 10  — shared selectivity across the population (+ cross-animal)
+    └── make_fig_simulated.py    # Suppl. Fig 4 — simulated simple/complex Gabor cells
 ```
 
 ## Reproducing the paper — pipeline, runs, and status
 
-The analyses form one dependency chain; each stage's output feeds the next:
+Figures are produced along two tracks. The **model track** is one dependency chain — each stage's
+output feeds the next:
 
 **synthesis → acquire mask → screening → DreamSim → similarity (d-prime + R² vs. sparsity) → figures**
+
+The **recorded track** loads the macaque V4 recordings (`data/recordings.py`, reading
+`EXPERIMENT_DIR`) and compares them to the twins: Fig 1c accuracy and Fig 7 verification need only
+the twin + recordings, while Fig 2 (model-vs-recorded skewness) and Fig 10 (population) also consume
+the screening output. The two tracks meet in the figures, which run in the paper's order — see the
+**Paper → code** and **Commands** sections below.
 
 1. **Synthesis** (`synthesis/`). Gradient ascent on the centered ensemble twins produces,
    per well-predicted neuron, a most-exciting input (MEI) and a least-exciting input (LEI):
@@ -354,7 +375,7 @@ The analyses form one dependency chain; each stage's output feeds the next:
    `subset.py` (every neuron's K=15 MAIs+LAIs ∪ a 200k uniform sample), passed via `--indices_path`.
 5. **Similarity** (`dream/similarity.py`). Embeddings are **globally centered** before every
    cosine (à la Franke — this removes the common-mode and is what gives d-prime/R² their range).
-   **Fig 6 d-prime** (within-MAI / within-LAI cosine coherence vs. random, ddof = 1) and **Fig 10
+   **Fig 6 d-prime** (within-MAI / within-LAI cosine coherence vs. random, ddof = 1) and **Fig 9
    2D similarity space** (each image's mean cosine to a neuron's 15 MAI / 15 LAI poles → degree-1
    linear-fit R², with random-pole controls), over **all** well-predicted neurons and related to
    each neuron's **skewness** so R²/d-prime form a continuous spectrum across sparsity (skewness =
@@ -363,25 +384,35 @@ The analyses form one dependency chain; each stage's output feeds the next:
    ImageNet is **our extension** (Franke reports rendered only); its R² is computed over the
    embedded subset (the constant ~205k/209k set), not all of ImageNet-1k.
 6. **Figures** (`figures/`). `make_fig_dreamsim.py` → Fig 6 (population coherence distributions +
-   d-prime scatter) and Fig 10 (example 2D spaces with the activity-gradient arrow and its 1D
+   d-prime scatter) and Fig 9 (example 2D spaces with the activity-gradient arrow and its 1D
    projection, the R² histogram, and the R²-vs-control scatter), both areas × datasets.
    `neuron_strips.py` → per-area MAI/LAI natural-image strips across the sparsity range (the same
    four neurons per area: 4, 5, most non-sparse, most sparse), and `make_fig_mei_lei.py` → the
    synthesized LEI/MEI seed strips for those same neurons (`synthesis.visualize.blend`). These
    serve the Figs 3–5 examples. All write PDFs to `PAPER_FIG_DIR`.
 
-### Paper → code
+### Paper → code (in the order the paper unfolds)
 
-| Paper | Code |
-|---|---|
-| Fig 1 — twins + inclusion (corr-to-avg > 0.4) | `twins/nets.py`, `utils.well_predicted_neurons` |
-| Fig 2 — sparseness (skewness < 2) | `utils.sparse_split` (on the ImageNet screening) |
-| Figs 3–5 — MEIs/LEIs + MAIs/LAIs | `synthesis/generate.py` + `screening/run.py` |
-| Figs 3–5 — plotting (MAI/LAI + LEI/MEI strips) | `figures/neuron_strips.py` + `figures/make_fig_mei_lei.py` |
-| RF mask (shared by screening + DreamSim) | `synthesis/mask.py` |
-| Fig 6 — DreamSim d-prime | `dream/sim.py` + `dream/similarity.py` |
-| Fig 10 — 2D similarity space, R² vs. sparsity | `dream/similarity.py` |
-| Figs 6 & 10 — plotting | `figures/make_fig_dreamsim.py` |
+| Paper figure | Produced by | Inputs / regime |
+|---|---|---|
+| **Fig 1** — twins + inclusion (corr-to-avg > 0.4) | `twins/nets.py`, `utils.well_predicted_neurons` | — |
+| **Fig 1c** — prediction accuracy (single-trial + corr-to-avg) | `figures/make_fig_accuracy.py` | recordings + twin eval (**`centered=False`**) |
+| **Fig 2** — sparseness continuum (skewness < 2; model vs recorded) | `figures/make_fig_sparsity.py` (`utils.sparse_split`, `data.recordings`) | screening skewness + recorded skewness |
+| **Figs 3–5** — MEIs/LEIs + MAIs/LAIs | `synthesis/generate.py` → `synthesis/mask.py` → `screening/run.py` | synthesis + screening (**`centered=True`**, RF-masked) |
+| **Figs 3–5** — plotting | `figures/neuron_strips.py` + `figures/make_fig_mei_lei.py` | — |
+| **Fig 6** — DreamSim MAI/LAI d-prime | `dream/sim.py` + `dream/similarity.py` → `figures/make_fig_dreamsim.py` | DreamSim (RF-masked, bg 0.45) |
+| **Fig 7** — recorded-response verification (non-sparse vs sparse) | `figures/make_fig_verify_data.py` | recordings + twin eval (`centered=False`) |
+| **Fig 9** — 2D similarity space, R² vs sparsity | `dream/similarity.py` → `figures/make_fig_dreamsim.py` | DreamSim |
+| **Fig 10** — population shared selectivity (+ cross-animal) | `figures/make_fig_population.py` | ImageNet screening + `subject_id` from recordings |
+| **Suppl. Fig 4** — simulated simple/complex cells | `figures/make_fig_simulated.py` | rendered scenes (Gabor; no twin) |
+
+Deferred: Fig 2e,f baseline firing (awaiting the gray-screen window), Fig 8 independent evaluator, Fig 11 mouse. **V4 only** for the recorded panels (no V1 recordings in this release).
+
+**Two evaluation regimes — keep them straight.** Figures that predict *recorded* responses to the
+actual stimuli (Fig 1c, Fig 7) use the twin with **learned readout positions** (`centered=False`)
+and the training transform `CenterCrop(200) → Resize(100, bicubic) → z-score 113.5/59.58` (no RF
+mask / L2 norm). The *screening / MAI-LAI* figures (Fig 2 model side, 6, 9, 10) use the **centered,
+RF-masked, L2-normed** screening responses (`centered=True`).
 
 ### Commands (install → analysis)
 
@@ -406,13 +437,19 @@ CUDA_VISIBLE_DEVICES=1 python -m dualneuron.dream.sim --dataset rendered --area 
 CUDA_VISIBLE_DEVICES=1 python -m dualneuron.dream.sim --dataset imagenet --area v4 --num_workers 4 \
     --indices_path "$ANALYSIS_DIR/v4/v4_dreamsim_imagenet_indices.npy"
 
-# Similarity — Fig 6 + Fig 10 (per model × dataset; saves {model}_similarity_{dataset}.npz)
+# Similarity — Fig 6 + Fig 9 (per model × dataset; saves {model}_similarity_{dataset}.npz)
 python -m dualneuron.dream.similarity --model v4 --dataset rendered --output "$ANALYSIS_DIR/v4/v4_similarity_rendered.npz"
 
-# Figures — into PAPER_FIG_DIR
-python -m dualneuron.figures.make_fig_dreamsim      # Fig 6 + Fig 10 (both areas × datasets)
-python -m dualneuron.figures.neuron_strips          # MAI/LAI strips (both areas × datasets)
-python -m dualneuron.figures.make_fig_mei_lei       # synthesized LEI/MEI seed strips (both areas)
+# Figures (into PAPER_FIG_DIR) — in the paper's order. The recorded-data figures
+# (accuracy, sparsity, verify_data, population) read EXPERIMENT_DIR via dualneuron.data.recordings.
+python -m dualneuron.figures.make_fig_accuracy      # Fig 1c   prediction accuracy (V4; recordings + twin)
+python -m dualneuron.figures.make_fig_sparsity      # Fig 2    skewness continuum (V4; needs screening + recordings)
+python -m dualneuron.figures.neuron_strips          # Figs 4-5 MAI/LAI strips (both areas × datasets)
+python -m dualneuron.figures.make_fig_mei_lei       # Figs 4-5 synthesized LEI/MEI seed strips (both areas)
+python -m dualneuron.figures.make_fig_dreamsim      # Fig 6 + Fig 9 (both areas × datasets)
+python -m dualneuron.figures.make_fig_verify_data   # Fig 7    recorded-response verification (V4; recordings + twin)
+python -m dualneuron.figures.make_fig_population    # Fig 10   population shared selectivity (V4; needs ImageNet screening)
+python -m dualneuron.figures.make_fig_simulated     # Suppl. Fig 4  simulated simple/complex cells (rendered)
 ```
 
 The commands above show V4; repeat screening, DreamSim, and similarity with `--area v1` /
@@ -438,7 +475,7 @@ ANALYSIS_DIR/
 ```
 
 The RF mask is written back to `dualneuron/twins/{model}/mask.npy` (`synthesis/mask.py`), and the
-Fig 6 / Fig 10 PDFs to `PAPER_FIG_DIR` (`dreamsim_dprime_{dataset}.pdf`,
+Fig 6 / Fig 9 PDFs to `PAPER_FIG_DIR` (`dreamsim_dprime_{dataset}.pdf`,
 `dreamsim_similarity_{area}_{dataset}.pdf`, plus the `mask_reconstruction.pdf` QC).
 
 General scheme: `{area}_{run}_{dataset}_{kind}`, with `run ∈ {ensemble, member{i}}` and
@@ -468,17 +505,21 @@ anon / inactive-file split in `memory.stat`, not the headline `memory.current`.
 
 ### Status
 
-- **Done:** twins + inclusion; `sparse_split` (V4 160 non-sparse / 45 sparse; V1 312 / 133);
-  screening (ensemble V4+V1 rendered+ImageNet, V4 member-0 ImageNet); synthesis (V4+V1 MEIs/LEIs);
-  RF masks reproduced from the MEIs/LEIs (`synthesis/mask.py`, corr 0.996 V4 / 0.992 V1); DreamSim
-  embeddings (V4+V1, rendered+ImageNet); similarity (`dream/similarity.py`) → Fig 6 d-prime + Fig 10
-  R² with centered embeddings, ddof-1 d-prime, 15-image poles and degree-1 controls; figures
-  (`figures/`: `make_fig_dreamsim` Fig 6/10, `neuron_strips` MAI/LAI strips, `make_fig_mei_lei`
-  LEI/MEI seed strips). The 2D similarity-space model is CV-validated as linear
-  (degree-2 adds a median ~1% R²), and V4 non-sparse R² ≈ 0.28 (rendered) matches Franke's 0.23.
-- **To follow:** Fig 2c (predicted vs recorded skewness), Fig 7 (test-set verification), Fig 9
-  (baseline firing rate), Fig 11 (population shared selectivity), the Fig 4/5 per-neuron panels,
-  and Fig 8 (independent-evaluator / member cross-check).
+- **Done (model backbone):** twins + inclusion; `sparse_split` (V4 160 non-sparse / 45 sparse;
+  V1 312 / 133); screening (ensemble V4+V1 rendered+ImageNet, V4 member-0 ImageNet); synthesis
+  (V4+V1 MEIs/LEIs); RF masks reproduced from the MEIs/LEIs (`synthesis/mask.py`, corr 0.996 V4 /
+  0.992 V1); DreamSim embeddings (V4+V1, rendered+ImageNet); similarity → **Fig 6** d-prime + **Fig 9**
+  2D space (centered embeddings, ddof-1 d-prime, 15-image poles, degree-1 controls; CV-validated
+  linear, V4 non-sparse R² ≈ 0.28 rendered vs Franke's 0.23); **Figs 4-5** DEI strips
+  (`neuron_strips`, `make_fig_mei_lei`).
+- **Done (recorded backbone, V4):** `data/recordings.py` (SESSION_ORDER aligns to `correlations.npy`,
+  r = 0.998); **Fig 1c** accuracy (recomputed corr-to-avg matches `correlations.npy` at r = 0.9997,
+  n>0.4 = 207); **Fig 2** model-vs-recorded skewness (r = 0.68, matching the paper's 0.66); **Fig 7**
+  recorded-response verification (non-sparse capture both extremes; sparse only the excitatory end);
+  **Fig 10** population (MAI right-skewed, LAI bimodal, random uniform; + cross-animal); **Suppl. Fig 4**
+  simulated simple (bimodal) vs complex (sparse) cells.
+- **To follow:** Fig 2e,f baseline firing (awaiting the gray-screen fixation window), Fig 8 independent
+  evaluator, Fig 11 mouse, and the V1 recorded panels (no V1 recordings in this release).
 
 ## Data Availability
 

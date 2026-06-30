@@ -1,5 +1,5 @@
 """
-DreamSim similarity figures: Fig 6 (MAI/LAI coherence d') and Fig 10 (2D similarity
+DreamSim similarity figures: Fig 6 (MAI/LAI coherence d') and Fig 9 (2D similarity
 space R^2 + controls), for V4 and V1 on the rendered and imagenet image sets.
 
 Aggregate panels are read from the saved {area}_similarity_{dataset}.npz (produced by
@@ -204,7 +204,7 @@ def fig_dprime(dataset, areas):
 
 
 def fig_similarity(area, dataset):
-    """Fig 10: example non-sparse (b,b') and sparse (c,c') 2D similarity spaces with the
+    """Fig 9: example non-sparse (b,b') and sparse (c,c') 2D similarity spaces with the
     activity-gradient arrow and its 1D projection, the R^2 histogram (d), and the
     R^2-vs-control scatter (f). Linear model (CV-validated planar); R^2 is the linear fit."""
     res = _results(area, dataset)
@@ -284,7 +284,7 @@ def fig_similarity(area, dataset):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="DreamSim coherence (Fig 6) and similarity-space (Fig 10) figures")
+    parser = argparse.ArgumentParser(description="DreamSim coherence (Fig 6) and similarity-space (Fig 9) figures")
     parser.add_argument("--area", choices=["v4", "v1"], default=None, help="default: both")
     parser.add_argument("--dataset", choices=["rendered", "imagenet"], default=None, help="default: both")
     args = parser.parse_args()
