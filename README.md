@@ -108,14 +108,6 @@ DATA_DIR/
 `logs/` and `figs/` mirror this: `LOGS_DIR/{area}/{backbone}/<stage>.log` and
 `PAPER_FIG_DIR/{area}/{backbone}/<figure>.pdf`.
 
-> **Upgrading from the old flat layout?** Earlier runs wrote analysis outputs directly under
-> `ANALYSIS_DIR/{area}/` with an `{area}_` filename prefix. Relocate them into the new
-> `{area}/{backbone}/` layout (they belong to the staged twin — v4→resnet, v1→convnext) with:
-> ```bash
-> python -m dualneuron.migrate_analysis_layout            # dry run (prints the planned moves)
-> python -m dualneuron.migrate_analysis_layout --apply    # execute (idempotent, move/rename)
-> ```
-
 ### Getting ImageNet
 ImageNet is **not** redistributed on Dryad. One-time setup:
 1. Request access to the gated [`ILSVRC/imagenet-1k`](https://huggingface.co/datasets/ILSVRC/imagenet-1k) dataset.
@@ -335,7 +327,6 @@ dualneuron/
 ├── data/recordings.py      # load_sessions / build_response_matrix (per area; SESSION_ORDER aligns neurons)
 ├── training/               # config.py, dataset.py, features.py, trainer.py, run.py, eval_ensemble.py, convert_dinov3_weights.py
 ├── figures/                # make_fig_*.py, neuron_strips.py  (per-twin PDFs)
-├── migrate_analysis_layout.py   # one-time old-flat -> {area}/{backbone}/ migration
 └── analysis/pca.py
 ```
 
