@@ -41,8 +41,10 @@ def _seed_image(image, alpha, channels):
     return b[..., 0] if channels == 1 else b
 
 
-def figure(area, backbone, neurons):
-    """One figure for `neurons` (list of (id, skewness), ascending), saved as PDF."""
+def figure(area, backbone, neurons, variant="free"):
+    """One figure for `neurons` (list of (id, skewness), ascending), saved as PDF.
+
+    `variant` selects the synthesis method to display ("free" or "axis")."""
     spec = registry.resolve(area, backbone)
     cmap = "gray" if spec.channels == 1 else None
     accent = ACCENT[area]
@@ -53,7 +55,7 @@ def figure(area, backbone, neurons):
     gs = fig.add_gridspec(nb, 1, hspace=0.5, left=0.11, right=0.95, top=0.99, bottom=0.06)
 
     for bi, (nid, sk) in enumerate(neurons):
-        z = np.load(registry.synthesis_neuron_path(area, backbone, nid))
+        z = np.load(registry.synthesis_neuron_path(area, backbone, nid, variant=variant))
         rows = [("LEI", z["lei_image"], z["lei_alpha"]),
                 ("MEI", z["mei_image"], z["mei_alpha"])]
         inner = gs[bi].subgridspec(2, N_SEEDS, hspace=0.05, wspace=0.05)
@@ -75,10 +77,11 @@ def figure(area, backbone, neurons):
     fig.text(0.5 * (0.11 + 0.95), 0.02, "synthesis seeds  1 → 10",
              ha="center", va="center", fontsize=10, color="0.3")
 
-    out = os.path.join(ensure_dir(os.path.join(FIGS, area, backbone)), "mei_lei_seeds.pdf")
+    stem = "mei_lei_seeds" if variant == "free" else f"mei_lei_seeds_{variant}"
+    out = os.path.join(ensure_dir(os.path.join(FIGS, area, backbone)), f"{stem}.pdf")
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
-    print(f"{area}/{backbone}: neurons {[n for n, _ in neurons]} -> {out}", flush=True)
+    print(f"{area}/{backbone} ({variant}): neurons {[n for n, _ in neurons]} -> {out}", flush=True)
     return out
 
 
@@ -88,6 +91,8 @@ if __name__ == "__main__":
     parser.add_argument("--backbone", required=True, choices=registry.BACKBONES)
     parser.add_argument("--neurons", type=int, nargs="+", default=None,
                         help="override the neuron set (still ordered by skewness)")
+    parser.add_argument("--variant", default="free", choices=registry.SYNTHESIS_VARIANTS,
+                        help="synthesis method to display: 'free' (default) or 'axis'")
     args = parser.parse_args()
 
     if args.neurons:
@@ -96,4 +101,4 @@ if __name__ == "__main__":
         neurons = sorted(((n, skew[n]) for n in args.neurons if n in skew), key=lambda t: t[1])
     else:
         neurons = select_neurons(args.area, args.backbone)
-    figure(args.area, args.backbone, neurons)
+    figure(args.area, args.backbone, neurons, variant=args.variant)

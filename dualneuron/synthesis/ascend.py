@@ -146,21 +146,38 @@ def total_variation_loss(image, weight=1e-4):
     return weight * tv_loss
 
 
+def _activation(objective_function, population_function, target_index, pole, x):
+    """Scalar activation of the target neuron: ``objective_function(x)`` when given, else the
+    (pole-signed) target response read from the full population — used for the init/final logging so
+    the population path needs no separate objective."""
+    if objective_function is not None:
+        return objective_function(x)
+    return pole * population_function(x)[:, target_index].mean()
+
+
 def optimization_step(
     objective_function,
     simulation_function,
     simulation_axis,
     simulation_weight,
-    image, 
-    box_size, 
-    noise_level, 
-    nb_crops, 
-    input_size, 
+    image,
+    box_size,
+    noise_level,
+    nb_crops,
+    input_size,
     target_norm,
     tv_weight=1e-4,
-    jitter_std=0.02, 
-    oversample=1, 
-    reflect_pad_frac=0.02
+    jitter_std=0.02,
+    oversample=1,
+    reflect_pad_frac=0.02,
+    population_function=None,
+    target_index=None,
+    pole=1.0,
+    population_axis=None,
+    population_mean=None,
+    population_std=None,
+    population_support=None,
+    axis_only=False,
 ):
     """
     Perform one optimization step for activation maximization.
@@ -211,10 +228,28 @@ def optimization_step(
     if target_norm is not None:
         processed = change_norm(processed, target_norm)
 
-    activation = objective_function(processed)
+    # One twin forward: read the target activation from the full population when in population mode
+    # (so the axis term below is free), else the plain scalar objective.
+    if population_function is not None:
+        pop = population_function(processed)                 # (nb_crops, N) full population
+        activation = pole * pop[:, target_index].mean()
+    else:
+        activation = objective_function(processed)
     tv_loss = total_variation_loss(image, weight=tv_weight)
-    loss = -activation + tv_loss
-    
+    # axis_only "folds" the drive into the axis: the population-axis cosine below IS the whole
+    # objective (use a target-INCLUDED axis), so there is no separate activation term.
+    loss = tv_loss if axis_only else (-activation + tv_loss)
+
+    # Population-axis (natural-manifold) term: align the z-scored population response with the neuron's
+    # MAI-LAI centroid axis by cosine (+axis for the MEI, -axis for the LEI, via `pole`). The axis lives
+    # in the well-predicted subspace, so we select those columns (`population_support`). Whether the
+    # target's own component participates is decided by the axis vector itself (kept for the folded
+    # a_full, zeroed for a context-only axis). Uses the population forward already done above.
+    if population_axis is not None:
+        z = (pop[:, population_support].mean(0) - population_mean) / population_std
+        z = z / (z.norm() + 1e-8)
+        loss = loss - pole * torch.dot(z, population_axis)
+
     if simulation_function is not None and simulation_axis is not None:
         img = (image - image.min()) / (image.max() - image.min() + 1e-8)
         img = F.interpolate(
@@ -257,6 +292,14 @@ def fourier_ascending(
     simulation_function=None,
     simulation_axis=None,
     simulation_weight=0.0,
+    population_function=None,
+    target_index=None,
+    pole=1.0,
+    population_axis=None,
+    population_mean=None,
+    population_std=None,
+    population_support=None,
+    axis_only=False,
     device='cuda',
     verbose=False,
     save_all_steps=False
@@ -357,16 +400,22 @@ def fourier_ascending(
                     init_image = change_norm(init_image, target_norm)
 
             init_image = init_image.to(device)
-            init_act = objective_function(init_image.unsqueeze(0)).item()
+            init_act = _activation(objective_function, population_function, target_index, pole, init_image.unsqueeze(0)).item()
             images.append(init_image.detach().cpu())
             activations.append(abs(init_act))
             
     if simulation_axis is not None:
         simulation_axis = torch.tensor(
-            simulation_axis, 
-            device=device, 
+            simulation_axis,
+            device=device,
             dtype=torch.float32
         )
+
+    if population_axis is not None:
+        population_axis = torch.as_tensor(population_axis, device=device, dtype=torch.float32)
+        population_mean = torch.as_tensor(population_mean, device=device, dtype=torch.float32)
+        population_std = torch.as_tensor(population_std, device=device, dtype=torch.float32)
+        population_support = torch.as_tensor(population_support, device=device, dtype=torch.long)
             
     if verbose:
         pbar = tqdm(range(total_steps))
@@ -389,7 +438,11 @@ def fourier_ascending(
             simulation_weight,
             img, box_size, noise,
             nb_crops, image_size, target_norm, tv_weight,
-            jitter_std, oversample, reflect_pad_frac
+            jitter_std, oversample, reflect_pad_frac,
+            population_function=population_function, target_index=target_index, pole=pole,
+            population_axis=population_axis,
+            population_mean=population_mean, population_std=population_std,
+            population_support=population_support, axis_only=axis_only,
         )
 
         loss.backward()
@@ -409,7 +462,7 @@ def fourier_ascending(
             if target_norm is not None:
                 clean_img = change_norm(clean_img, target_norm)
             
-            act = objective_function(clean_img.unsqueeze(0)).item()
+            act = _activation(objective_function, population_function, target_index, pole, clean_img.unsqueeze(0)).item()
             activations.append(abs(act))
 
             if save_all_steps:
@@ -463,6 +516,14 @@ def pixel_ascending(
     simulation_function=None,
     simulation_axis=None,
     simulation_weight=0.0,
+    population_function=None,
+    target_index=None,
+    pole=1.0,
+    population_axis=None,
+    population_mean=None,
+    population_std=None,
+    population_support=None,
+    axis_only=False,
     device='cuda',
     verbose=False,
     save_all_steps=False
@@ -595,16 +656,22 @@ def pixel_ascending(
                 init_img = recorrelate_colors(init_img, device)
             if target_norm is not None:
                 init_img = change_norm(init_img, target_norm)
-            init_act = objective_function(init_img.unsqueeze(0)).item()
+            init_act = _activation(objective_function, population_function, target_index, pole, init_img.unsqueeze(0)).item()
             images.append(init_img.detach().cpu())
             activations.append(abs(init_act))
 
     if simulation_axis is not None:
         simulation_axis = torch.tensor(
-            simulation_axis, 
-            device=device, 
+            simulation_axis,
+            device=device,
             dtype=torch.float32
         )
+
+    if population_axis is not None:
+        population_axis = torch.as_tensor(population_axis, device=device, dtype=torch.float32)
+        population_mean = torch.as_tensor(population_mean, device=device, dtype=torch.float32)
+        population_std = torch.as_tensor(population_std, device=device, dtype=torch.float32)
+        population_support = torch.as_tensor(population_support, device=device, dtype=torch.long)
 
     if verbose:
         pbar = tqdm(range(total_steps))
@@ -625,7 +692,11 @@ def pixel_ascending(
             simulation_weight,
             img, box_size, noise,
             nb_crops, image_size, target_norm, tv_weight,
-            jitter_std, oversample, reflect_pad_frac
+            jitter_std, oversample, reflect_pad_frac,
+            population_function=population_function, target_index=target_index, pole=pole,
+            population_axis=population_axis,
+            population_mean=population_mean, population_std=population_std,
+            population_support=population_support, axis_only=axis_only,
         )
 
         loss.backward()
@@ -656,7 +727,7 @@ def pixel_ascending(
             if target_norm is not None:
                 clean_img = change_norm(clean_img, target_norm)
             
-            act = objective_function(clean_img.unsqueeze(0)).item()
+            act = _activation(objective_function, population_function, target_index, pole, clean_img.unsqueeze(0)).item()
             activations.append(abs(act))
 
             if save_all_steps:

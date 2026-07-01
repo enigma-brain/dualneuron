@@ -24,6 +24,7 @@ import torch
 
 from dualneuron.twins.nets import load_model
 from dualneuron.twins import registry
+from dualneuron.dream.axis import population_axis
 from dualneuron.synthesis.ascend import pixel_ascending, fourier_ascending
 from dualneuron.utils import ensure_dir, env_dir, RewriteLine
 
@@ -96,7 +97,8 @@ def _objective(model, neuron_id, weight):
 
 
 def generate(area, backbone, output_dir=None, num_seeds=10, neurons=None,
-             weights_dir=None, device="cuda", log_path=None, log_every=30.0):
+             weights_dir=None, mode="free", axis_k=20, axis_field="full",
+             device="cuda", log_path=None, log_every=30.0):
     """
     Synthesize MEIs and LEIs for a twin's neurons, one npz per neuron.
 
@@ -110,12 +112,19 @@ def generate(area, backbone, output_dir=None, num_seeds=10, neurons=None,
         backbone (str): Twin backbone ("resnet"/"dino" for v4, "convnext"/"dino" for v1). The
             (area, backbone) pair selects the twin, ascent method, and geometry via the registry.
         output_dir (str, optional): Folder for the per-neuron npz files.
-            Default: ANALYSIS_DIR/{area}/{backbone}/synthesis.
+            Default: the mode's synthesis dir (ANALYSIS_DIR/{area}/{backbone}/synthesis[_axis]).
         num_seeds (int): Random seeds per neuron. Default: 10.
         neurons (sequence, optional): Explicit neuron indices. Default: the
             well-predicted set (correlation-to-average > 0.4) for the twin.
         weights_dir (str, optional): Trained-ensemble dir (default: staged for resnet/convnext,
             TRAINED_MODELS_DIR/{area}/{backbone} for dino).
+        mode (str): Synthesis method. "free" (default) is the original free ascent that maximizes the
+            neuron's activation. "axis" folds the drive into the natural population axis: it maximizes
+            cos(z_pop, a_full) over the well-predicted subspace (target component kept) -- a single
+            bounded objective that reproduces the neuron's natural MAI/LAI endpoint state. "axis" needs
+            the twin's full-field screening.
+        axis_k (int): MAIs/LAIs per centroid when building the axis (mode="axis"). Default: 20.
+        axis_field (str): Screening regime the axis is built from (mode="axis"). Default: "full".
         device (str): Torch device. Default: "cuda".
         log_path (str, optional): Progress-log file; a single line is rewritten in
             place, bracketed by a header and footer. Without it, progress goes to
@@ -129,6 +138,8 @@ def generate(area, backbone, output_dir=None, num_seeds=10, neurons=None,
             - mei_alpha, lei_alpha (S, C, H, W)
             - mei_activation, lei_activation (S,)
     """
+    if mode not in registry.SYNTHESIS_VARIANTS:
+        raise ValueError(f"unknown mode {mode!r}; expected one of {registry.SYNTHESIS_VARIANTS}")
     spec = registry.resolve(area, backbone)
 
     if neurons is None:
@@ -138,13 +149,22 @@ def generate(area, backbone, output_dir=None, num_seeds=10, neurons=None,
     params = _ascend_params(spec, device)
     ascend = _ASCEND[spec.synth_method]
 
+    # "axis" mode folds the drive into the natural population axis a_full (target component KEPT), from
+    # the full-field screening; the cosine to it is the whole objective (axis_only). "free" needs none.
+    axis_map = pop_mean = pop_std = pop_support = None
+    if mode == "axis":
+        pa = population_axis(area, backbone, neurons=neurons, k=axis_k, field=axis_field,
+                             weights_dir=weights_dir, exclude_target=False)
+        axis_map = {int(n): pa["axis"][r] for r, n in enumerate(pa["neurons"])}
+        pop_mean, pop_std, pop_support = pa["mean"], pa["std"], pa["support"]
+
     if output_dir is None:
         if ANALYSIS_DIR is None:
             raise ValueError(
                 "ANALYSIS_DIR is not set. Set it in .env "
                 "(e.g. ANALYSIS_DIR=${DATA_DIR}/DUAL-FEATURE-ANALYSIS) or pass output_dir."
             )
-        output_dir = registry.synthesis_dir(area, backbone)
+        output_dir = registry.synthesis_dir(area, backbone, variant=mode)
     output_dir = ensure_dir(output_dir)
 
     def out_file(neuron_id):
@@ -162,7 +182,7 @@ def generate(area, backbone, output_dir=None, num_seeds=10, neurons=None,
         ensure_dir(Path(log_path).parent)
         log_file = open(log_path, "w")
         log_file.write(
-            f"synthesize area={area} backbone={backbone} neurons={len(neurons)} "
+            f"synthesize area={area} backbone={backbone} mode={mode} neurons={len(neurons)} "
             f"(done {done}, todo {len(todo)}) seeds={num_seeds}\n"
         )
         log_file.flush()
@@ -196,14 +216,22 @@ def generate(area, backbone, output_dir=None, num_seeds=10, neurons=None,
             torch.manual_seed(seed)
             np.random.seed(seed)
             for pole, weight in poles:
-                res = ascend(_objective(model, neuron_id, weight), **params)
+                if mode == "axis":
+                    res = ascend(None, population_function=model, target_index=neuron_id,
+                                 pole=float(weight), population_axis=axis_map[neuron_id],
+                                 population_mean=pop_mean, population_std=pop_std,
+                                 population_support=pop_support, axis_only=True, **params)
+                else:
+                    res = ascend(_objective(model, neuron_id, weight), **params)
                 results[f"{pole}_image"].append(res["image"].detach().cpu().numpy())
                 results[f"{pole}_alpha"].append(res["alpha"].detach().cpu().numpy())
                 results[f"{pole}_activation"].append(float(res["activation"]))
+        meta = {} if mode == "free" else {"mode": mode}   # keep the free npz byte-identical
         np.savez_compressed(
             out_file(neuron_id),
             neuron_id=neuron_id,
             seeds=np.array(seeds),
+            **meta,
             **{key: np.stack(values) for key, values in results.items()},
         )
     elapsed = time.time() - start
@@ -226,12 +254,17 @@ if __name__ == '__main__':
     parser.add_argument("--num_seeds", type=int, default=10,
                         help="random seeds per neuron (default: 10)")
     parser.add_argument("--output_dir", type=str, default=None,
-                        help="output directory (default ANALYSIS_DIR/{area}/{backbone}/synthesis)")
+                        help="output directory (default: the mode's synthesis[_axis] dir)")
     parser.add_argument("--neurons", type=int, nargs="+", default=None,
                         help="explicit neuron indices (default: well-predicted set)")
     parser.add_argument("--weights_dir", type=str, default=None,
                         help="trained-ensemble dir (default: staged for resnet/convnext; "
                              "TRAINED_MODELS_DIR/{area}/{backbone} for dino)")
+    parser.add_argument("--mode", type=str, default="free", choices=registry.SYNTHESIS_VARIANTS,
+                        help="'free' (original activation ascent) or 'axis' (fold the drive into the "
+                             "natural population axis; needs the twin's full-field screening)")
+    parser.add_argument("--axis_k", type=int, default=20, help="MAIs/LAIs per centroid for the axis (mode=axis)")
+    parser.add_argument("--axis_field", type=str, default="full", help="screening regime for the axis")
     parser.add_argument("--device", type=str, default="cuda", help="device to run on")
     parser.add_argument("--log_path", type=str, default=None,
                         help="progress log file (default LOGS_DIR/{area}_{backbone}_synthesis.log)")
@@ -241,7 +274,8 @@ if __name__ == '__main__':
 
     log_path = args.log_path
     if log_path is None and LOGS_DIR is not None:
-        log_path = os.path.join(LOGS_DIR, args.area, args.backbone, "synthesis.log")
+        stem = "synthesis" if args.mode == "free" else f"synthesis_{args.mode}"
+        log_path = os.path.join(LOGS_DIR, args.area, args.backbone, f"{stem}.log")
 
     generate(
         area=args.area,
@@ -250,6 +284,9 @@ if __name__ == '__main__':
         num_seeds=args.num_seeds,
         neurons=args.neurons,
         weights_dir=args.weights_dir,
+        mode=args.mode,
+        axis_k=args.axis_k,
+        axis_field=args.axis_field,
         device=args.device,
         log_path=log_path,
         log_every=args.log_every,

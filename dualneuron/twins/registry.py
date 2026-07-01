@@ -129,14 +129,24 @@ def similarity_path(area: str, backbone: str, dataset: str) -> str:
     return os.path.join(analysis_dir(area, backbone), f"similarity_{dataset}.npz")
 
 
-def synthesis_dir(area: str, backbone: str) -> str:
-    """MEI/LEI output dir: ``ANALYSIS_DIR/{area}/{backbone}/synthesis``."""
-    return os.path.join(analysis_dir(area, backbone), "synthesis")
+# Synthesis methods: "free" is the original free ascent (dir kept as plain ``synthesis`` so the
+# shipped MEIs/LEIs and everything downstream are untouched); "axis" is the population-axis
+# (folded) method, written alongside in ``synthesis_axis``.
+SYNTHESIS_VARIANTS = ("free", "axis")
 
 
-def synthesis_neuron_path(area: str, backbone: str, neuron: int) -> str:
-    """One neuron's MEI/LEI npz: ``.../synthesis/neuron{id:04d}.npz``."""
-    return os.path.join(synthesis_dir(area, backbone), f"neuron{int(neuron):04d}.npz")
+def synthesis_dir(area: str, backbone: str, variant: str = "free") -> str:
+    """MEI/LEI output dir: ``ANALYSIS_DIR/{area}/{backbone}/synthesis`` (free) or
+    ``.../synthesis_{variant}`` for another synthesis method."""
+    if variant not in SYNTHESIS_VARIANTS:
+        raise ValueError(f"unknown synthesis variant {variant!r}; expected one of {SYNTHESIS_VARIANTS}")
+    name = "synthesis" if variant == "free" else f"synthesis_{variant}"
+    return os.path.join(analysis_dir(area, backbone), name)
+
+
+def synthesis_neuron_path(area: str, backbone: str, neuron: int, variant: str = "free") -> str:
+    """One neuron's MEI/LEI npz: ``.../{synthesis dir}/neuron{id:04d}.npz``."""
+    return os.path.join(synthesis_dir(area, backbone, variant), f"neuron{int(neuron):04d}.npz")
 
 
 # ---------------------------------------------------------------------------
