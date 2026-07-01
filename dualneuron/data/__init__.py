@@ -1,8 +1,9 @@
-"""Recorded neuronal data for the macaque V4 digital-twin analyses."""
+"""Recorded neuronal data for the macaque digital-twin analyses (V4 and V1)."""
 
 from dualneuron.data.recordings import (
     SESSION_ORDER,
-    all_trials_dir,
+    SKIP_BINS,
+    trials_dir,
     build_response_matrix,
     load_sessions,
     recorded_responses,
@@ -10,7 +11,8 @@ from dualneuron.data.recordings import (
 
 __all__ = [
     "SESSION_ORDER",
-    "all_trials_dir",
+    "SKIP_BINS",
+    "trials_dir",
     "build_response_matrix",
     "load_sessions",
     "recorded_responses",

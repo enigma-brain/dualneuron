@@ -12,13 +12,13 @@ import numpy as np
 from dotenv import load_dotenv
 load_dotenv()
 
-from dualneuron.utils import env_dir, ensure_dir, well_predicted_neurons
+from dualneuron.utils import env_dir, ensure_dir
+from dualneuron.twins import registry
 
 ANALYSIS_DIR = env_dir("ANALYSIS_DIR")
-_AREA_MODELS = {"v1": "V1GrayTaskDriven", "v4": "V4ColorTaskDriven"}
 
 
-def build_imagenet_subset(area, k=15, n_sample=200000, seed=0, total=1281167,
+def build_imagenet_subset(area, backbone, k=15, n_sample=200000, seed=0, total=1281167,
                           ordered_indices_path=None):
     """
     Indices for the per-area ImageNet DreamSim subset.
@@ -29,12 +29,13 @@ def build_imagenet_subset(area, k=15, n_sample=200000, seed=0, total=1281167,
 
     Args:
         area: "v1" or "v4".
+        backbone: twin backbone (selects the twin's well-predicted set + screening indices).
         k: Number of MAIs and of LAIs per neuron to include as extremes. Default: 15.
         n_sample: Uniform-sample size over the non-extreme images. Default: 200000.
         seed: RNG seed for the uniform sample. Default: 0.
         total: Number of screened ImageNet images (the index space). Default: 1281167.
         ordered_indices_path: Path to the screening indices npz. Default:
-            ANALYSIS_DIR/{area}/{area}_ensemble_imagenet_ordered_indices.npz.
+            ANALYSIS_DIR/{area}/{backbone}/ensemble_imagenet_ordered_indices.npz.
 
     Returns:
         dict: {
@@ -43,11 +44,9 @@ def build_imagenet_subset(area, k=15, n_sample=200000, seed=0, total=1281167,
             "sample": the (sorted) uniform sample of non-extremes,
         }
     """
-    neurons = well_predicted_neurons(_AREA_MODELS[area])
+    neurons = registry.well_predicted_neurons(area, backbone)
     if ordered_indices_path is None:
-        ordered_indices_path = os.path.join(
-            ANALYSIS_DIR, area, f"{area}_ensemble_imagenet_ordered_indices.npz"
-        )
+        ordered_indices_path = registry.screening_path(area, backbone, "ensemble", "imagenet", "indices")
     ordered = np.load(ordered_indices_path)
 
     extremes = set()
@@ -73,21 +72,20 @@ def build_imagenet_subset(area, k=15, n_sample=200000, seed=0, total=1281167,
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Build the per-area ImageNet DreamSim subset indices")
-    parser.add_argument("--area", type=str, required=True, choices=["v1", "v4"])
+    parser.add_argument("--area", type=str, required=True, choices=registry.AREAS)
+    parser.add_argument("--backbone", type=str, required=True, choices=registry.BACKBONES)
     parser.add_argument("--k", type=int, default=15, help="top-k MAIs and bottom-k LAIs per neuron")
     parser.add_argument("--n_sample", type=int, default=200000, help="uniform sample of non-extreme images")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--total", type=int, default=1281167, help="number of screened ImageNet images")
     parser.add_argument("--output_path", type=str, default=None,
-                        help="default ANALYSIS_DIR/{area}/{area}_dreamsim_imagenet_indices.npy")
+                        help="default ANALYSIS_DIR/{area}/{backbone}/dreamsim_imagenet_indices.npy")
     args = parser.parse_args()
 
-    res = build_imagenet_subset(args.area, k=args.k, n_sample=args.n_sample,
+    res = build_imagenet_subset(args.area, args.backbone, k=args.k, n_sample=args.n_sample,
                                 seed=args.seed, total=args.total)
-    out = args.output_path or os.path.join(
-        ANALYSIS_DIR, args.area, f"{args.area}_dreamsim_imagenet_indices.npy"
-    )
+    out = args.output_path or registry.dreamsim_indices_path(args.area, args.backbone)
     ensure_dir(os.path.dirname(out))
     np.save(out, res["subset"])
-    print(f"{args.area}: {len(res['extremes'])} extremes + {len(res['sample'])} sampled "
+    print(f"{args.area}/{args.backbone}: {len(res['extremes'])} extremes + {len(res['sample'])} sampled "
           f"= {len(res['subset'])} total -> {out}")

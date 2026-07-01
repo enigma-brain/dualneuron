@@ -9,8 +9,8 @@ load_dotenv()
 
 from pathlib import Path
 from dualneuron.screening.sets import ImagenetImages, RenderedImages
+from dualneuron.twins import registry
 from dualneuron.utils import ensure_dir, env_dir, RewriteLine
-import dualneuron
 
 import numpy as np
 import torch
@@ -28,14 +28,11 @@ RENDERED_DIR = env_dir("RENDERED_DIR")
 IMAGENET_CACHE_DIR = env_dir("IMAGENET_CACHE_DIR")
 
 
-# Per-area DreamSim preprocessing defaults. crop_size matches the screening crop so
-# the RF mask aligns with what each neuron actually read; V1 is grayscale (repeated to
-# 3 channels for DreamSim's RGB backbones), V4 color; the contrast norm is the same for
-# both (3 channels in either case, so the per-pixel contrast matches).
-_AREA_DEFAULTS = {
-    "v4": {"crop_size": 200, "num_channels": 3, "use_grayscale": False, "norm": 80.0},
-    "v1": {"crop_size": 167, "num_channels": 3, "use_grayscale": True, "norm": 80.0},
-}
+# DreamSim preprocessing constants, independent of the twin backbone: DreamSim's RGB backbones take
+# 224px 3-channel input, contrast-normalized to a fixed L2 around a neutral gray. The twin-dependent
+# bits come from the registry: the RF mask, the center-crop (area RF, so the mask aligns with what
+# the neuron read), and whether to grayscale (V1, repeated to 3 channels for DreamSim).
+_DREAMSIM = {"output_size": (224, 224), "num_channels": 3, "norm": 80.0}
 
 
 def gray_contrast_normalize(images, gray, norm, eps=1e-8):
@@ -66,12 +63,13 @@ def gray_contrast_normalize(images, gray, norm, eps=1e-8):
 
 def embeddings(
     data_dir,
+    area,
+    backbone,
     cache_dir=None,
     output_path=None,
-    token=None, 
-    split='train', 
+    token=None,
+    split='train',
     dataset="rendered",
-    area='v4',
     use_grayscale=None,
     use_mask=True,
     use_norm=True,
@@ -96,7 +94,9 @@ def embeddings(
         token: HuggingFace token for ImageNet (if needed)
         split: Dataset split ('train', 'validation', 'test')
         dataset: 'rendered' or 'imagenet'
-        area: 'v1' or 'v4' mask to use
+        area: 'v1' or 'v4'
+        backbone: twin backbone ('resnet'/'dino' for v4, 'convnext'/'dino' for v1); with area it
+            selects the RF mask, center-crop, and grayscale via the registry
         use_grayscale: Whether to convert images to grayscale
         use_mask: Whether to apply mask to images
         use_norm: Whether to contrast-normalize (deviation from gray to L2 'norm')
@@ -129,18 +129,18 @@ def embeddings(
             None: saves an .npz with arrays 'embeddings' and 'indices'.
     """
     assert dataset in ['rendered', 'imagenet']
-    assert area in ['v1', 'v4']
+    spec = registry.resolve(area, backbone)
 
-    # Resolve per-area preprocessing defaults (crop matched to the screening, etc.).
-    defaults = _AREA_DEFAULTS[area]
+    # Twin-dependent preprocessing from the registry (crop matched to the screening RF; grayscale for
+    # V1, repeated to 3 channels for DreamSim); the rest are DreamSim constants.
     if crop_size is None:
-        crop_size = defaults["crop_size"]
-    if num_channels is None:
-        num_channels = defaults["num_channels"]
+        crop_size = spec.crop_size
     if use_grayscale is None:
-        use_grayscale = defaults["use_grayscale"]
+        use_grayscale = spec.channels == 1
+    if num_channels is None:
+        num_channels = _DREAMSIM["num_channels"]
     if norm is None:
-        norm = defaults["norm"]
+        norm = _DREAMSIM["norm"]
 
     cache_dir = cache_dir or MODELS_DIR
 
@@ -153,12 +153,9 @@ def embeddings(
     )
     model = model.eval()
     
-    # Load mask
-    package_dir = Path(dualneuron.__file__).parent
-    model_name = "V4ColorTaskDriven" if area == 'v4' else "V1GrayTaskDriven"
-    mask_path = package_dir / "twins" / model_name / "mask.npy"
-    mask = np.load(mask_path)
-    
+    # Load the twin's RF mask (staged for a shipped twin, regenerated for a trained one).
+    mask = np.load(registry.mask_path(area, backbone))
+
     if dataset == "rendered":    
         dset = RenderedImages(
             data_dir=data_dir,
@@ -224,7 +221,7 @@ def embeddings(
         ensure_dir(Path(log_path).parent)
         log_file = open(log_path, "w")
         log_file.write(
-            f"embed dataset={dataset} area={area} images={len(indices)} "
+            f"embed dataset={dataset} area={area} backbone={backbone} images={len(indices)} "
             f"batch_size={batch_size} "
             f"norm={norm if use_norm else 'off'} bg={bg_value}\n"
         )
@@ -240,7 +237,7 @@ def embeddings(
             file=progress_file,
             mininterval=log_every,
             ncols=100,
-            desc=f"embed {dataset} {area}",
+            desc=f"embed {dataset} {area}/{backbone}",
         ):
             images = images.to(device)
             if use_norm:
@@ -275,7 +272,8 @@ if __name__ == "__main__":
     parser.add_argument("--token", type=str, default=None, help="Huggingface token for imagenet")
     parser.add_argument("--split", type=str, default="train", help="train, validation, or test for imagenet")
     parser.add_argument("--dataset", type=str, help="rendered or imagenet")
-    parser.add_argument("--area", type=str, default="v4", help="v1 or v4 mask to use")
+    parser.add_argument("--area", type=str, required=True, choices=registry.AREAS, help="v1 or v4")
+    parser.add_argument("--backbone", type=str, required=True, choices=registry.BACKBONES, help="twin backbone")
     parser.add_argument("--use_grayscale", type=bool, default=None, help="Grayscale (default: per-area; V1 True, V4 False)")
     parser.add_argument("--use_mask", type=bool, default=True, help="Whether to use mask")
     parser.add_argument("--use_norm", type=bool, default=True, help="Whether to control norm")
@@ -303,7 +301,7 @@ if __name__ == "__main__":
                 "or pass --data_dir."
             )
 
-    # Default outputs under ANALYSIS_DIR/{area} and LOGS_DIR, created on demand.
+    # Default outputs under ANALYSIS_DIR/{area}/{backbone} and LOGS_DIR, created on demand.
     output_path = args.output_path
     if output_path is None:
         if ANALYSIS_DIR is None:
@@ -311,16 +309,13 @@ if __name__ == "__main__":
                 "ANALYSIS_DIR is not set. Set it in .env (e.g. "
                 "ANALYSIS_DIR=${DATA_DIR}/DUAL-FEATURE-ANALYSIS) or pass --output_path."
             )
-        output_path = os.path.join(
-            ANALYSIS_DIR, args.area,
-            f"{args.area}_dreamsim_{args.dataset}_embeddings.npz",
-        )
+        output_path = registry.dreamsim_embeddings_path(args.area, args.backbone, args.dataset)
 
     log_path = args.log_path
     if log_path is None:
         logs_dir = os.getenv("LOGS_DIR")
         if logs_dir is not None:
-            log_path = os.path.join(logs_dir, f"{args.area}_dreamsim_{args.dataset}.log")
+            log_path = os.path.join(logs_dir, args.area, args.backbone, f"dreamsim_{args.dataset}.log")
 
     embeddings(
         data_dir=data_dir,
@@ -330,6 +325,7 @@ if __name__ == "__main__":
         split=args.split,
         dataset=args.dataset,
         area=args.area,
+        backbone=args.backbone,
         use_grayscale=args.use_grayscale,
         use_mask=args.use_mask,
         use_norm=args.use_norm,

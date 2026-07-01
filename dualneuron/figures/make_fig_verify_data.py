@@ -1,4 +1,4 @@
-"""Recorded-response verification figure (paper Fig. 7 / Fig_3_Verify_Data, V4): for each neuron we
+"""Recorded-response verification figure (paper Fig. 7 / Fig_3_Verify_Data): for each neuron we
 take the test image the model predicts to be most- and least-activating, and show where those
 images fall within the neuron's *recorded* response distribution over the test set -- separately for
 non-sparse and sparse neurons.
@@ -13,9 +13,9 @@ Predictions use the same eval pipeline as the accuracy figure -- learned readout
 recorded responses to the actual test stimuli. Recorded responses come from dualneuron.data.recordings;
 the sparse/non-sparse split is the screening-skewness split (threshold 2.0).
 
-V4 only -- there are no V1 recordings in this dataset.
+Requires the area's recordings + its canonical SESSION_ORDER (V4 set; V1 pending its order).
 
-    python -m dualneuron.figures.make_fig_verify_data
+    python -m dualneuron.figures.make_fig_verify_data --area v4 --backbone resnet
 """
 import os
 from pathlib import Path
@@ -27,7 +27,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from dotenv import load_dotenv
 
-from dualneuron.utils import env_dir, ensure_dir, sparse_split
+from dualneuron.utils import env_dir, ensure_dir
+from dualneuron.twins import registry
 from dualneuron.data.recordings import load_sessions, build_response_matrix
 from dualneuron.figures.make_fig_accuracy import _predict  # shared eval pipeline (centered=False)
 
@@ -47,13 +48,13 @@ def _percentile(values, x):
     return 100.0 * np.mean(values <= x)
 
 
-def main():
+def main(area, backbone, weights_dir=None):
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    sessions = load_sessions()
-    image_ids, recorded, _ = build_response_matrix(sessions, split="test")   # (n_img, 394) NaN-sparse
-    preds = _predict(image_ids, device)                                      # (n_img, 394)
+    sessions = load_sessions(area)
+    image_ids, recorded, _ = build_response_matrix(sessions, split="test")   # (n_img, N) NaN-sparse
+    preds = _predict(area, backbone, image_ids, device, weights_dir=weights_dir)   # (n_img, N)
 
-    split = sparse_split("v4")                          # well-predicted neurons split by skewness 2.0
+    split = registry.sparse_split(area, backbone)       # well-predicted neurons split by skewness 2.0
     groups = {"non-sparse": np.asarray(split["non_sparse"]), "sparse": np.asarray(split["sparse"])}
 
     # per-neuron recorded percentile of the predicted most- and least-activating test image
@@ -74,7 +75,7 @@ def main():
         for end, color in (("least", POLE["least"]), ("most", POLE["most"])):
             ax[row].hist(pct[g][end], range=(0, 100), bins=20, histtype="step",
                          color=color, linewidth=1.5, label=f"predicted {end}")
-        ax[row].set_title(f"V4 {g} (n={len(pct[g]['most'])})", fontsize=10)
+        ax[row].set_title(f"{area.upper()} {g} (n={len(pct[g]['most'])})", fontsize=10)
         ax[row].set_ylabel("# neurons")
         _despine(ax[row])
         med = {e: np.median(pct[g][e]) for e in ("most", "least")}
@@ -82,11 +83,17 @@ def main():
     ax[0].legend(frameon=False, fontsize=8)
     ax[1].set_xlabel("recorded response percentile")
     fig.tight_layout()
-    out = os.path.join(ensure_dir(FIGS), "fig_verify_data_v4.pdf")
+    out = os.path.join(ensure_dir(os.path.join(FIGS, area, backbone)), "fig_verify_data.pdf")
     fig.savefig(out, dpi=300)
     plt.close(fig)
     print(f"saved {out}", flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    p = argparse.ArgumentParser(description="Recorded-response verification figure (Fig 7) for one twin")
+    p.add_argument("--area", required=True, choices=registry.AREAS)
+    p.add_argument("--backbone", required=True, choices=registry.BACKBONES)
+    p.add_argument("--weights_dir", default=None)
+    args = p.parse_args()
+    main(args.area, args.backbone, args.weights_dir)

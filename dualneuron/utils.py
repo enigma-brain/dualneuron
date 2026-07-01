@@ -1,10 +1,11 @@
 """
 Small shared utilities for the dualneuron package.
+
+Twin-aware helpers (well_predicted_neurons, sparse_split, the area/backbone catalog and its analysis
+paths) live in :mod:`dualneuron.twins.registry` -- the single source of truth for the pipeline.
 """
 import os
 from pathlib import Path
-
-import numpy as np
 
 
 def env_dir(name, default=None):
@@ -81,86 +82,3 @@ class RewriteLine:
 
     def flush(self):
         self._f.flush()
-
-
-def well_predicted_neurons(model_name, threshold=0.4):
-    """
-    Global indices of the well-predicted neurons of a twin model.
-
-    Reads the per-model correlations.npy shipped under
-    dualneuron/twins/{model_name}/ (each neuron's correlation-to-average on
-    held-out test images) and returns the indices that clear the inclusion
-    threshold used throughout the analyses.
-
-    Args:
-        model_name: Twin model folder name, e.g. "V4ColorTaskDriven" or
-            "V1GrayTaskDriven".
-        threshold: Minimum correlation-to-average for inclusion. Default: 0.4.
-
-    Returns:
-        np.ndarray: Sorted 1-D array of global neuron indices with
-            correlation > threshold.
-    """
-    path = Path(__file__).resolve().parent / "twins" / model_name / "correlations.npy"
-    corr = np.load(path)
-    return np.where(corr > threshold)[0]
-
-
-# Analysis area -> twin model folder name.
-_AREA_MODELS = {"v1": "V1GrayTaskDriven", "v4": "V4ColorTaskDriven"}
-
-
-def sparse_split(area, threshold=2.0, responses_path=None):
-    """
-    Split an area's well-predicted neurons into sparse and non-sparse sets.
-
-    Following Franke et al., a neuron's lifetime sparsity is the skewness of its
-    predicted responses to the ImageNet screening set; neurons with skewness below
-    `threshold` (2.0 in the paper) are non-sparse, the rest sparse. The split is
-    restricted to the well-predicted neurons (correlation-to-average > 0.4) of the
-    area, obtained via well_predicted_neurons.
-
-    Args:
-        area: "v1" or "v4".
-        threshold: Skewness cutoff; skewness < threshold is non-sparse. Default: 2.0.
-        responses_path: Path to the imagenet screening responses npz (keyed
-            unit_{neuron}). Default:
-            ANALYSIS_DIR/{area}/{area}_ensemble_imagenet_ordered_responses.npz.
-
-    Returns:
-        dict: {
-            "neurons": well-predicted neuron indices (np.ndarray),
-            "skewness": per-neuron skewness aligned to "neurons" (np.ndarray),
-            "non_sparse": neuron indices with skewness < threshold (np.ndarray),
-            "sparse": neuron indices with skewness >= threshold (np.ndarray),
-        }
-
-    Raises:
-        FileNotFoundError: If the screening responses npz is missing, with a message
-            pointing to the screening command that produces it.
-    """
-    neurons = well_predicted_neurons(_AREA_MODELS[area])
-
-    if responses_path is None:
-        responses_path = os.path.join(
-            env_dir("ANALYSIS_DIR"), area, f"{area}_ensemble_imagenet_ordered_responses.npz"
-        )
-    if not os.path.exists(responses_path):
-        raise FileNotFoundError(
-            f"Screening responses not found: {responses_path}. "
-            f"Run the imagenet screening first: "
-            f"python -m dualneuron.screening.run --model {area} --dataset imagenet"
-        )
-    responses = np.load(responses_path)
-
-    # Fisher-Pearson skewness (scipy default); invariant to the ascending sort of the
-    # screening responses. Imported lazily to keep the rest of utils dependency-light.
-    from scipy.stats import skew
-    skewness = np.array([skew(responses[f"unit_{int(n)}"]) for n in neurons])
-
-    return {
-        "neurons": neurons,
-        "skewness": skewness,
-        "non_sparse": neurons[skewness < threshold],
-        "sparse": neurons[skewness >= threshold],
-    }

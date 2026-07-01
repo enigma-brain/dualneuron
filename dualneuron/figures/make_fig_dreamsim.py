@@ -2,13 +2,13 @@
 DreamSim similarity figures: Fig 6 (MAI/LAI coherence d') and Fig 9 (2D similarity
 space R^2 + controls), for V4 and V1 on the rendered and imagenet image sets.
 
-Aggregate panels are read from the saved {area}_similarity_{dataset}.npz (produced by
-dualneuron.dream.similarity); the per-neuron example panels are computed on the fly
-from the DreamSim embeddings via similarity_space_neuron / coherence_neuron. PDFs are
-written to PAPER_FIG_DIR.
+Aggregate panels are read from the saved similarity_{dataset}.npz under
+ANALYSIS_DIR/{area}/{backbone}/ (produced by dualneuron.dream.similarity); the per-neuron example
+panels are computed on the fly from the DreamSim embeddings via similarity_space_neuron /
+coherence_pooled. One twin per run (per-twin figures); PDFs are written to PAPER_FIG_DIR.
 
-    python -m dualneuron.figures.make_fig_dreamsim                       # all areas x datasets
-    python -m dualneuron.figures.make_fig_dreamsim --area v4 --dataset rendered
+    python -m dualneuron.figures.make_fig_dreamsim --area v4 --backbone resnet   # both datasets
+    python -m dualneuron.figures.make_fig_dreamsim --area v1 --backbone convnext --dataset rendered
 """
 import os
 import argparse
@@ -20,12 +20,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from dotenv import load_dotenv
 
-from dualneuron.utils import env_dir, ensure_dir, sparse_split
+from dualneuron.utils import env_dir, ensure_dir
+from dualneuron.twins import registry
 from dualneuron.dream.similarity import similarity_space_neuron, coherence_pooled
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(REPO_ROOT / ".env")
-ANALYSIS_DIR = env_dir("ANALYSIS_DIR")
 FIGS = env_dir("PAPER_FIG_DIR", str(REPO_ROOT / "figs"))
 
 AREA = {"v4": dict(color="#2c6fbb", label="V4"), "v1": dict(color="#e08a1e", label="V1")}
@@ -42,29 +42,28 @@ def _panel(ax, letter):
             fontweight="bold", va="top", ha="right")
 
 
-def _example_neurons(area):
+def _example_neurons(area, backbone):
     """The most non-sparse (min skewness) and most sparse (max skewness) well-predicted
-    neurons of an area -- the same pair used in the neuron_strips figures. Skewness is
+    neurons of a twin -- the same pair used in the neuron_strips figures. Skewness is
     from the imagenet screening (sparse_split), so the examples are identical across the
     rendered and imagenet figures."""
-    sp = sparse_split(area)
+    sp = registry.sparse_split(area, backbone)
     return (int(sp["neurons"][np.argmin(sp["skewness"])]),
             int(sp["neurons"][np.argmax(sp["skewness"])]))
 
 
-def _results(area, dataset):
-    return np.load(os.path.join(ANALYSIS_DIR, area, f"{area}_similarity_{dataset}.npz"))
+def _results(area, backbone, dataset):
+    return np.load(registry.similarity_path(area, backbone, dataset))
 
 
-def _embeddings(area, dataset):
-    z = np.load(os.path.join(ANALYSIS_DIR, area, f"{area}_dreamsim_{dataset}_embeddings.npz"))
+def _embeddings(area, backbone, dataset):
+    z = np.load(registry.dreamsim_embeddings_path(area, backbone, dataset))
     return z["embeddings"], z["indices"]
 
 
-def _ordered(area, dataset):
-    base = os.path.join(ANALYSIS_DIR, area)
-    resp = np.load(os.path.join(base, f"{area}_ensemble_{dataset}_ordered_responses.npz"))
-    idx = np.load(os.path.join(base, f"{area}_ensemble_{dataset}_ordered_indices.npz"))
+def _ordered(area, backbone, dataset):
+    resp = np.load(registry.screening_path(area, backbone, "ensemble", dataset, "responses"))
+    idx = np.load(registry.screening_path(area, backbone, "ensemble", dataset, "indices"))
     return resp, idx
 
 
@@ -135,17 +134,17 @@ def _projection_panel(ax, x, y, activity, bx, by, color, nb=30):
     ax.set_ylabel("mean activity")
 
 
-def fig_dprime(dataset, areas):
-    """Fig 6: example within/random cosine distributions (b) and d' scatter (c)."""
+def fig_dprime(area, backbone, dataset):
+    """Fig 6: for one twin, example within/random cosine distributions (b) and d' scatter (c)."""
     fig, (axb, axc) = plt.subplots(1, 2, figsize=(9.5, 4.3))
+    color, label = AREA[area]["color"], AREA[area]["label"]
 
-    # Panel b: within-MAI / within-LAI vs pole-to-random cosine distributions, pooled over
-    # all non-sparse neurons of the example area (population view, not one cherry-picked cell).
-    ex_area = "v4" if "v4" in areas else areas[0]
-    res = _results(ex_area, dataset)
+    # Panel b: within-MAI / within-LAI vs pole-to-random cosine distributions, pooled over all
+    # non-sparse neurons of this twin (population view, not one cherry-picked cell).
+    res = _results(area, backbone, dataset)
     neurons_ns = res["coh_neurons"][res["coh_non_sparse"]]
-    emb, idx = _embeddings(ex_area, dataset)
-    _, oi = _ordered(ex_area, dataset)
+    emb, idx = _embeddings(area, backbone, dataset)
+    _, oi = _ordered(area, backbone, dataset)
     cp = coherence_pooled(emb, idx, oi, neurons_ns)
     rand = np.concatenate([cp["mai_random"], cp["lai_random"]])
     allc = np.concatenate([rand, cp["within_mai"], cp["within_lai"]])
@@ -156,33 +155,23 @@ def fig_dprime(dataset, areas):
     axb.hist(cp["within_lai"], color=POLE["lai"], label="within LAI", **hkw)
     axb.set_xlabel("cosine similarity")
     axb.set_ylabel("density")
-    axb.set_title(f"{AREA[ex_area]['label']} non-sparse (n={len(neurons_ns)})", fontsize=9)
+    axb.set_title(f"{label}/{backbone} non-sparse (n={len(neurons_ns)})", fontsize=9)
     axb.legend(frameon=False, fontsize=8)
     _despine(axb)
     _panel(axb, "b")
 
-    # Panel c: d'(MAI vs random) vs d'(LAI vs random), non-sparse neurons per area.
+    # Panel c: d'(MAI vs random) vs d'(LAI vs random), this twin's non-sparse neurons, over the
+    # gray rand-vs-rand control cloud near the origin.
     rng = np.random.default_rng(0)
-    allv = []
-    # All rand-vs-rand controls first (gray null cloud near the origin), then the areas
-    # with V4 drawn last so its points are not buried under the larger V1 population.
-    for area in areas:
-        r = _results(area, dataset)
-        m = r["coh_non_sparse"]
-        dc = r["coh_dprime_control"][m]
-        allv.append(dc)
-        axc.scatter(dc, rng.permutation(dc), facecolors="none", edgecolors="0.78",
-                    s=16, linewidths=0.7)
-    for area in sorted(areas, key=lambda a: a == "v4"):
-        r = _results(area, dataset)
-        m = r["coh_non_sparse"]
-        dm, dl = r["coh_dprime_mai"][m], r["coh_dprime_lai"][m]
-        allv += [dm, dl]
-        axc.scatter(dm, dl, facecolors="none", edgecolors=AREA[area]["color"],
-                    s=26, linewidths=1.2, label=AREA[area]["label"])
-    # Data-driven square limits showing the entire scatter (our preprocessing differs
-    # from Franke's, so the d' range differs; never clip to a fixed window).
-    allv = np.concatenate(allv)
+    m = res["coh_non_sparse"]
+    dc = res["coh_dprime_control"][m]
+    dm, dl = res["coh_dprime_mai"][m], res["coh_dprime_lai"][m]
+    axc.scatter(dc, rng.permutation(dc), facecolors="none", edgecolors="0.78",
+                s=16, linewidths=0.7, label="random")
+    axc.scatter(dm, dl, facecolors="none", edgecolors=color, s=26, linewidths=1.2, label=label)
+    # Data-driven square limits showing the entire scatter (our preprocessing differs from
+    # Franke's, so the d' range differs; never clip to a fixed window).
+    allv = np.concatenate([dc, dm, dl])
     lo, hi = float(np.nanmin(allv)), float(np.nanmax(allv))
     margin = 0.05 * (hi - lo)
     lim = [lo - margin, hi + margin]
@@ -197,22 +186,22 @@ def fig_dprime(dataset, areas):
     _panel(axc, "c")
 
     fig.tight_layout()
-    out = os.path.join(ensure_dir(FIGS), f"dreamsim_dprime_{dataset}.pdf")
+    out = os.path.join(ensure_dir(os.path.join(FIGS, area, backbone)), f"dreamsim_dprime_{dataset}.pdf")
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
-    print(f"dprime {dataset}: {AREA[ex_area]['label']} pooled n={len(neurons_ns)} -> {out}", flush=True)
+    print(f"dprime {area}/{backbone} {dataset}: non-sparse n={len(neurons_ns)} -> {out}", flush=True)
 
 
-def fig_similarity(area, dataset):
+def fig_similarity(area, backbone, dataset):
     """Fig 9: example non-sparse (b,b') and sparse (c,c') 2D similarity spaces with the
     activity-gradient arrow and its 1D projection, the R^2 histogram (d), and the
     R^2-vs-control scatter (f). Linear model (CV-validated planar); R^2 is the linear fit."""
-    res = _results(area, dataset)
+    res = _results(area, backbone, dataset)
     ns, r2, neurons = res["sp_non_sparse"], res["sp_r2"], res["sp_neurons"]
-    emb, idx = _embeddings(area, dataset)
-    resp, oi = _ordered(area, dataset)
+    emb, idx = _embeddings(area, backbone, dataset)
+    resp, oi = _ordered(area, backbone, dataset)
 
-    ex_ns, ex_sp = _example_neurons(area)          # most non-sparse / most sparse (as neuron_strips)
+    ex_ns, ex_sp = _example_neurons(area, backbone)   # most non-sparse / most sparse (as neuron_strips)
     Sns = similarity_space_neuron(emb, idx, resp, oi, ex_ns)
     Ssp = similarity_space_neuron(emb, idx, resp, oi, ex_sp)
 
@@ -277,23 +266,20 @@ def fig_similarity(area, dataset):
     _despine(ax)
     _panel(ax, "f")
 
-    out = os.path.join(ensure_dir(FIGS), f"dreamsim_similarity_{area}_{dataset}.pdf")
+    out = os.path.join(ensure_dir(os.path.join(FIGS, area, backbone)), f"dreamsim_similarity_{dataset}.pdf")
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
-    print(f"similarity {area} {dataset}: non-sparse n{ex_ns}, sparse n{ex_sp} -> {out}", flush=True)
+    print(f"similarity {area}/{backbone} {dataset}: non-sparse n{ex_ns}, sparse n{ex_sp} -> {out}", flush=True)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="DreamSim coherence (Fig 6) and similarity-space (Fig 9) figures")
-    parser.add_argument("--area", choices=["v4", "v1"], default=None, help="default: both")
+    parser.add_argument("--area", required=True, choices=registry.AREAS)
+    parser.add_argument("--backbone", required=True, choices=registry.BACKBONES)
     parser.add_argument("--dataset", choices=["rendered", "imagenet"], default=None, help="default: both")
     args = parser.parse_args()
 
-    areas = [args.area] if args.area else ["v4", "v1"]
     datasets = [args.dataset] if args.dataset else ["rendered", "imagenet"]
-
     for dataset in datasets:
-        fig_dprime(dataset, areas)
-    for area in areas:
-        for dataset in datasets:
-            fig_similarity(area, dataset)
+        fig_dprime(args.area, args.backbone, dataset)
+        fig_similarity(args.area, args.backbone, dataset)

@@ -18,7 +18,14 @@ dependencies = [
 	"dreamsim",
 	"datajoint<2.2",
 	"torch",
-	"torchvision"
+	"torchvision",
+	"ftfy>=6.3.1",
+	"omegaconf>=2.3.1",
+	"regex>=2026.5.9",
+	"scikit-learn>=1.7.2",
+	"submitit>=1.5.4",
+	"termcolor>=3.3.0",
+	"torchmetrics>=1.9.0",
 ]
 
 [tool.setuptools.packages.find]

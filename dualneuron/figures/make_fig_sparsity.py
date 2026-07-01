@@ -1,4 +1,4 @@
-"""Sparsity-continuum figure (paper Fig. 2, V4): lifetime-sparsity skewness across the V4 population.
+"""Sparsity-continuum figure (paper Fig. 2): lifetime-sparsity skewness across a twin's population.
 
 Panels (baseline-firing panels e,f are deferred until the gray-screen baseline is available):
 * b: sorted response profiles for the most non-sparse and most sparse well-predicted neuron --
@@ -14,9 +14,9 @@ Two skewness measures, two regimes:
 * RECORDED skewness comes from the recordings loader: ``scipy.stats.skew`` over each neuron's mean
   (over-repeats) recorded test responses (observed images only).
 
-V4 only -- there are no V1 recordings in this dataset.
+Requires the area's recordings + its canonical SESSION_ORDER (V4 set; V1 pending its order).
 
-    python -m dualneuron.figures.make_fig_sparsity
+    python -m dualneuron.figures.make_fig_sparsity --area v4 --backbone resnet
 """
 import os
 from pathlib import Path
@@ -28,14 +28,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from dotenv import load_dotenv
 
-from dualneuron.utils import env_dir, ensure_dir, sparse_split
+from dualneuron.utils import env_dir, ensure_dir
+from dualneuron.twins import registry
 from dualneuron.data.recordings import load_sessions, build_response_matrix
+from dualneuron.figures.neuron_strips import ACCENT
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(REPO_ROOT / ".env")
-ANALYSIS_DIR = env_dir("ANALYSIS_DIR")
 FIGS = env_dir("PAPER_FIG_DIR", str(REPO_ROOT / "figs"))
-V4 = dict(color="#2c6fbb", label="V4")
 SKEW_THRESHOLD = 2.0
 
 
@@ -50,13 +50,14 @@ def _profile(ax, values, color, label):
     ax.plot(np.linspace(0, 1, len(v)), v, color=color, linewidth=1.4, label=label)
 
 
-def main():
-    sp = sparse_split("v4")
+def main(area, backbone):
+    color = ACCENT[area]
+    sp = registry.sparse_split(area, backbone)
     neurons = np.asarray(sp["neurons"])               # well-predicted global indices
     model_skew = np.asarray(sp["skewness"])           # screening skewness, aligned to `neurons`
 
-    sessions = load_sessions()
-    image_ids, recorded, _ = build_response_matrix(sessions, split="test")   # (n_img, 394) NaN-sparse
+    sessions = load_sessions(area)
+    image_ids, recorded, _ = build_response_matrix(sessions, split="test")   # (n_img, N) NaN-sparse
 
     # recorded skewness per well-predicted neuron (observed test images only)
     rec_skew = np.full(len(neurons), np.nan)
@@ -66,7 +67,7 @@ def main():
             rec_skew[k] = skew(obs)
 
     # screening ordered responses for the example profiles (sorted ascending, per neuron)
-    ordered = np.load(os.path.join(ANALYSIS_DIR, "v4", "v4_ensemble_imagenet_ordered_responses.npz"))
+    ordered = np.load(registry.screening_path(area, backbone, "ensemble", "imagenet", "responses"))
 
     ns = int(neurons[np.argmin(model_skew)])          # most non-sparse
     sparse_n = int(neurons[np.argmax(model_skew)])    # most sparse
@@ -80,7 +81,7 @@ def main():
         _profile(a, ordered[f"unit_{n}"], "0.55", "model (screening)")
         k = int(np.where(neurons == n)[0][0])
         _profile(a, recorded[~np.isnan(recorded[:, n]), n], "black", "recorded (test)")
-        a.set_title(f"V4 {label} neuron {n}\nskew model={model_skew[k]:.2f}  rec={rec_skew[k]:.2f}", fontsize=9)
+        a.set_title(f"{area.upper()} {label} neuron {n}\nskew model={model_skew[k]:.2f}  rec={rec_skew[k]:.2f}", fontsize=9)
         a.set_xlabel("sorted image rank")
         a.set_ylabel("response")
         _despine(a)
@@ -90,14 +91,14 @@ def main():
     # panel c: model vs recorded skewness
     valid = ~np.isnan(rec_skew)
     r = np.corrcoef(model_skew[valid], rec_skew[valid])[0, 1]
-    ax[1, 0].scatter(model_skew[valid], rec_skew[valid], s=12, color=V4["color"], alpha=0.6, edgecolors="none")
+    ax[1, 0].scatter(model_skew[valid], rec_skew[valid], s=12, color=color, alpha=0.6, edgecolors="none")
     ax[1, 0].set_xlabel("model skewness (screening)")
     ax[1, 0].set_ylabel("recorded skewness (test)")
     ax[1, 0].set_title(f"r = {r:.2f}  (n = {int(valid.sum())})", fontsize=9)
     _despine(ax[1, 0])
 
     # panel d: population distribution of model skewness + threshold
-    ax[1, 1].hist(model_skew, bins=30, color=V4["color"], alpha=0.8)
+    ax[1, 1].hist(model_skew, bins=30, color=color, alpha=0.8)
     ax[1, 1].axvline(SKEW_THRESHOLD, ls=":", color="gray", linewidth=1.2)
     ax[1, 1].set_xlabel("model skewness")
     ax[1, 1].set_ylabel("# neurons")
@@ -107,11 +108,16 @@ def main():
     print(f"[stats] model-vs-recorded skewness r={r:.3f} (n={int(valid.sum())}); "
           f"non-sparse={int((model_skew < SKEW_THRESHOLD).sum())} sparse={int((model_skew >= SKEW_THRESHOLD).sum())}", flush=True)
     fig.tight_layout()
-    out = os.path.join(ensure_dir(FIGS), "fig_sparsity_v4.pdf")
+    out = os.path.join(ensure_dir(os.path.join(FIGS, area, backbone)), "fig_sparsity.pdf")
     fig.savefig(out, dpi=300)
     plt.close(fig)
     print(f"saved {out}", flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    p = argparse.ArgumentParser(description="Sparsity-continuum figure (Fig 2) for one twin")
+    p.add_argument("--area", required=True, choices=registry.AREAS)
+    p.add_argument("--backbone", required=True, choices=registry.BACKBONES)
+    args = p.parse_args()
+    main(args.area, args.backbone)

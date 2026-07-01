@@ -1,4 +1,4 @@
-"""Population figure (paper Fig. 10 / Fig_Population, V4): most- and least-activating images of one
+"""Population figure (paper Fig. 10 / Fig_Population): most- and least-activating images of one
 neuron tend to strongly or weakly activate other neurons, revealing shared feature selectivity.
 
 For each (non-sparse) source neuron we take its top-N most-activating (MAI) and bottom-N
@@ -15,9 +15,10 @@ Everything is from the SCREENING responses (centered=True, RF-masked, L2-normed 
 regime -- so no model forwarding here; the sparse/non-sparse split is the screening-skewness split.
 N=10 matches the reference code (the paper text states 15; the distributions are robust to this).
 
-V4 only -- there are no V1 recordings in this dataset.
+Requires the area's recordings (subject_id per neuron) + its canonical SESSION_ORDER + ImageNet
+screening (V4 set; V1 pending its order).
 
-    python -m dualneuron.figures.make_fig_population
+    python -m dualneuron.figures.make_fig_population --area v4 --backbone resnet
 """
 import os
 from pathlib import Path
@@ -28,12 +29,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from dotenv import load_dotenv
 
-from dualneuron.utils import env_dir, ensure_dir, sparse_split
+from dualneuron.utils import env_dir, ensure_dir
+from dualneuron.twins import registry
 from dualneuron.data.recordings import load_sessions, build_response_matrix
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(REPO_ROOT / ".env")
-ANALYSIS_DIR = env_dir("ANALYSIS_DIR")
 FIGS = env_dir("PAPER_FIG_DIR", str(REPO_ROOT / "figs"))
 N_EXTREME = 10           # reference analyze_neuron_relationships uses 10 (paper text says 15)
 N_BINS = 10
@@ -96,16 +97,16 @@ def _panel(ax, dists, title):
     _despine(ax)
 
 
-def main():
-    sp = sparse_split("v4")
+def main(area, backbone):
+    sp = registry.sparse_split(area, backbone)
     nonsparse = [int(n) for n in np.asarray(sp["non_sparse"])]
 
     # subject id per global neuron (for the cross-animal split)
-    _, _, meta = build_response_matrix(load_sessions(), split="test")
+    _, _, meta = build_response_matrix(load_sessions(area), split="test")
     subject = {m["global_idx"]: m["subject_id"] for m in meta}
 
     # screening (imagenet) sorted indices for the non-sparse neurons
-    oi = np.load(os.path.join(ANALYSIS_DIR, "v4", "v4_ensemble_imagenet_ordered_indices.npz"))
+    oi = np.load(registry.screening_path(area, backbone, "ensemble", "imagenet", "indices"))
     idx_by_neuron = {g: oi[f"unit_{g}"] for g in nonsparse}
     n_images = len(next(iter(idx_by_neuron.values())))
     print(f"[info] non-sparse neurons={len(nonsparse)}  images={n_images}  subjects={sorted(set(subject.values()))}", flush=True)
@@ -114,7 +115,7 @@ def main():
 
     subj_vals = sorted(set(subject[g] for g in nonsparse))
     fig, ax = plt.subplots(1, 2, figsize=(11, 3.6))
-    _panel(ax[0], within, f"V4 within-population (n={len(nonsparse)} non-sparse)")
+    _panel(ax[0], within, f"{area.upper()} within-population (n={len(nonsparse)} non-sparse)")
     ax[0].legend(frameon=False, fontsize=8)
 
     if len(subj_vals) == 2:
@@ -128,11 +129,16 @@ def main():
         print(f"[stats] within {c}: bin0(low%)={m[0]:.3f} bin9(high%)={m[-1]:.3f}", flush=True)
 
     fig.tight_layout()
-    out = os.path.join(ensure_dir(FIGS), "fig_population_v4.pdf")
+    out = os.path.join(ensure_dir(os.path.join(FIGS, area, backbone)), "fig_population.pdf")
     fig.savefig(out, dpi=300)
     plt.close(fig)
     print(f"saved {out}", flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    p = argparse.ArgumentParser(description="Population shared-selectivity figure (Fig 10) for one twin")
+    p.add_argument("--area", required=True, choices=registry.AREAS)
+    p.add_argument("--backbone", required=True, choices=registry.BACKBONES)
+    args = p.parse_args()
+    main(args.area, args.backbone)

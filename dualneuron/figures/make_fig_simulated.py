@@ -28,9 +28,9 @@ from dualneuron.utils import env_dir, ensure_dir
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(REPO_ROOT / ".env")
-IMAGES = os.path.join(env_dir("EXPERIMENT_DIR"), "images_all_types")
+IMAGES = os.path.join(env_dir("EXPERIMENT_DIR"), "v4", "images")
 FIGS = env_dir("PAPER_FIG_DIR", str(REPO_ROOT / "figs"))
-RENDERED_LO, RENDERED_HI = 49076, 75000     # rendered-scene id block in images_all_types
+RENDERED_LO, RENDERED_HI = 49076, 75000     # rendered-scene id block in v4/images
 SIZE, SIGMA = 100, 10
 POLE = {"most": "#c0392b", "least": "#2f6db0"}
 LUM = np.array([0.299, 0.587, 0.114], np.float32)
@@ -58,7 +58,7 @@ def simple_cell_library(n_cells=100, size=SIZE, sigma=SIGMA, seed=0):
 
 
 def _load_rendered_patches(n=8000, seed=0):
-    """Grayscale SIZE x SIZE center patches of n rendered scenes from images_all_types."""
+    """Grayscale SIZE x SIZE center patches of n rendered scenes from v4/images."""
     ids = sorted(int(os.path.basename(f)[:-4]) for f in glob(os.path.join(IMAGES, "*.npy")))
     ids = [i for i in ids if RENDERED_LO <= i <= RENDERED_HI]
     rng = np.random.default_rng(seed)

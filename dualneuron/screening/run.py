@@ -11,9 +11,9 @@ os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 from pathlib import Path
 from dualneuron.screening.sets import ImagenetImages, RenderedImages
 from dualneuron.twins.nets import load_model
+from dualneuron.twins import registry
 from dualneuron.twins.activations import get_layer_info, get_spatial_activation
 from dualneuron.utils import ensure_dir, env_dir, RewriteLine
-import dualneuron
 
 import numpy as np
 from tqdm import tqdm
@@ -39,17 +39,22 @@ def _run_tag(ensemble, member):
 
 
 def screen_activations(
+    area,
+    backbone,
     data_dir,
     output_dir=None,
     token=None,
     split='train',
     dataset="rendered",
     use_experiment_frame=True,
-    model='v4',
+    field="masked",
+    n_sample=None,
+    subset_seed=0,
     layer=None,
     location='center',
     ensemble=True,
     member=None,
+    weights_dir=None,
     batch_size=32,
     num_workers=0,
     save_format="npz",
@@ -65,9 +70,13 @@ def screen_activations(
     activation value for each neuron, enabling identification of most/least activating images.
     
     Args:
+        area (str): Recorded area — 'v4' or 'v1'.
+        backbone (str): Twin backbone — 'resnet'/'dino' (v4) or 'convnext'/'dino' (v1). The
+            (area, backbone) pair resolves the twin, geometry, normalization, and RF mask via
+            :mod:`dualneuron.twins.registry`.
         data_dir (str): Path to the directory containing the image dataset.
-        output_dir (str, optional): Directory to save ordered responses and indices.
-            If None, returns results directly instead of saving to disk.
+        output_dir (str, optional): Directory to save ordered responses and indices
+            (default ANALYSIS_DIR/{area}/{backbone}). If None, returns results instead of saving.
         token (str, optional): HuggingFace token for accessing ImageNet dataset.
             Required when dataset="imagenet".
         split (str): Dataset split to use. One of 'train', 'validation', or 'test'.
@@ -78,12 +87,14 @@ def screen_activations(
             experiment frame (resize short side to 420 + center-band crop) instead
             of Resize(256), matching how the rendered stimulus frames were made.
             Ignored for the rendered dataset. Default: True.
-        model (str): Model architecture to use. Options:
-            - 'v1': V1GrayTaskDriven (grayscale, 93x93 input, 458 neurons)
-            - 'v4': V4ColorTaskDriven (color, 100x100 input, 394 neurons)
-            - 'v4g': V4GrayTaskDriven (grayscale, 100x100 input, 1244 neurons)
-            - other: Generic model with 224x224 input
-            Default: 'v4'.
+        field (str): 'masked' (default) applies the RF mask + L2 contrast norm (the MAI/LAI
+            screening regime). 'full' is full-field natural — no mask, no L2 — keeping only the
+            twin's z-score + crop/resize; it needs no mask, so it can run before any MEI/mask exists
+            (the population-axis regime). Output files carry a 'fullfield' tag in this case.
+        n_sample (int, optional): Screen a uniform random subset of this many images (e.g. 200000 for
+            the full-field ImageNet axis) instead of the whole dataset. Ordered indices are the global
+            image ids of the sampled subset. Default: None (screen all).
+        subset_seed (int): RNG seed for --n_sample; fixed so every twin screens the same images.
         layer (str, optional): Layer name for activation extraction. If None, uses
             the model's final output layer. Default: None.
         location (str): Spatial location for activation extraction. Typically 'center'
@@ -93,10 +104,12 @@ def screen_activations(
         member (int, optional): Screen a single ensemble member by index instead of
             the ensemble average; output files are tagged member{member}. Default:
             None (use the ensemble).
+        weights_dir (str, optional): Trained-ensemble directory. If None (default), the
+            staged weights for resnet/convnext, or TRAINED_MODELS_DIR/{area}/{backbone} for dino.
         batch_size (int): Number of images per batch for processing. Default: 32.
         num_workers (int): Number of worker processes for data loading. Default: 0.
         save_format (str): Output format when output_dir is provided. 'npz' writes the
-            files {model}_{tag}_{dataset}_ordered_responses.npz and ..._indices.npz,
+            files {tag}_{dataset}_ordered_responses.npz and ..._indices.npz,
             each keyed by unit_{neuron_id}; 'npy' writes per-neuron .npy files in two
             folders. Default: 'npz'.
         device (str): Device to run computations on ('cuda' or 'cpu'). Default: 'cuda'.
@@ -118,18 +131,18 @@ def screen_activations(
         
         If output_dir is provided:
             None: Results are saved to disk. With save_format='npz' (default):
-                - {output_dir}/{model}_{tag}_{dataset}_ordered_responses.npz
-                - {output_dir}/{model}_{tag}_{dataset}_ordered_indices.npz
+                - {output_dir}/{tag}_{dataset}_ordered_responses.npz
+                - {output_dir}/{tag}_{dataset}_ordered_indices.npz
               both keyed by unit_{neuron_id}, each a per-neuron array sorted ascending.
               With save_format='npy', per-neuron .npy files are written instead:
-                - {output_dir}/{model}_{tag}_{layer}_{dataset}_ordered_responses/{neuron_id}.npy
-                - {output_dir}/{model}_{tag}_{layer}_{dataset}_ordered_indices/{neuron_id}.npy
+                - {output_dir}/{tag}_{layer}_{dataset}_ordered_responses/{neuron_id}.npy
+                - {output_dir}/{tag}_{layer}_{dataset}_ordered_indices/{neuron_id}.npy
 
     Notes:
         - Images are preprocessed with center cropping, resizing, normalization,
-          and masking according to model requirements.
-        - Each area model uses its own receptive-field mask (V1/V4/V4g); other
-          architectures fall back to the V4 mask.
+          and masking according to the twin's registry geometry.
+        - Each twin uses its own receptive-field mask (dualneuron.twins.registry.mask_path):
+          the staged mask for a shipped twin, the regenerated one for a trained twin.
         - Results are sorted in ascending order, so the last indices correspond
           to the most strongly activating images (highest pole), and the first
           indices correspond to the least activating images (lowest pole).
@@ -137,64 +150,53 @@ def screen_activations(
 
     assert dataset in ['rendered', 'imagenet']
 
+    spec = registry.resolve(area, backbone)
     tag = _run_tag(ensemble, member)
 
     function = load_model(
-        architecture=model,
+        architecture=spec.arch,
         layer=layer,
         ensemble=ensemble or member is not None,
         centered=True,
+        weights_dir=weights_dir,
         device=device
     )
     if member is not None:
         function = function.members[member]
-    
-    # img_mean/img_std are the twin's training z-score stats (0-255 scale) from the
-    # model configs in twins/nets.py; the data pipeline reproduces that normalization.
-    if model == 'v1':
-        output_size = (93, 93)
-        norm = 12.0
-        num_channels = 1
-        model_name = "V1GrayTaskDriven"
-        img_mean, img_std = 124.54466, 70.28
-    elif model == 'v4':
-        output_size = (100, 100)
-        norm = 40.0
-        num_channels = 3
-        model_name = "V4ColorTaskDriven"
-        img_mean, img_std = 113.5, 59.58
-    elif model == 'v4g':
-        output_size = (100, 100)
-        norm = 25.0
-        num_channels = 1
-        model_name = "V4GrayTaskDriven"
-        img_mean, img_std = 124.54466, 70.28
-    else:
-        output_size = (224, 224)
-        norm = 80.0
-        num_channels = 3
-        model_name = "V4ColorTaskDriven" # use V4 mask for other models too
-        img_mean, img_std = None, None  # generic backbone: fall back to ImageNet stats
-    
-    package_dir = Path(dualneuron.__file__).parent
-    mask_path = package_dir / "twins" / model_name / "mask.npy"
-    mask = np.load(mask_path)
-    
-    if dataset == "rendered":    
+
+    # Per-twin screening geometry + normalization, all from the central registry (single source of
+    # truth). img_mean/img_std are the twin's training z-score stats (0-255 scale); norm is the L2
+    # contrast target; grayscale/crop/output_size/num_channels match the twin's input. These are the
+    # established per-run constants (e.g. v4/resnet: 100px, crop 200, L2 40, 113.5/59.58; v1/convnext:
+    # 93px, crop 167, L2 12, 124.54/70.28) — screening a twin means exactly what it did before.
+    output_size = (spec.input_size, spec.input_size)
+    norm = spec.screen_norm
+    num_channels = spec.channels
+    grayscale = spec.channels == 1
+    crop_size = spec.crop_size
+    img_mean, img_std = spec.img_mean, spec.img_std
+
+    # "masked" screening applies the RF mask + L2 contrast norm (the MAI/LAI regime). "full" screening
+    # is full-field natural (no mask, no L2 — only the twin's z-score + crop/resize), so it needs no
+    # mask and can run first, before any MEI/mask exists.
+    masked = field == "masked"
+    mask = np.load(registry.mask_path(area, backbone)) if masked else None
+
+    if dataset == "rendered":
         dset = RenderedImages(
             data_dir=data_dir,
             use_center_crop=True,
             use_resize_output=True,
-            use_grayscale=True if model in ['v1', 'v4g'] else False,
+            use_grayscale=grayscale,
             use_normalize=True,
-            use_mask=True,
+            use_mask=masked,
             use_crop_to_mask=False,
-            use_norm=True,
+            use_norm=masked,
             use_clip=False,
             mask=mask,
             num_channels=num_channels,
             output_size=output_size,
-            crop_size=167 if model == 'v1' else (200 if model in ('v4', 'v4g') else 236),
+            crop_size=crop_size,
             bg_value=0.0,
             clip_min=0.0,
             clip_max=1.0,
@@ -210,17 +212,17 @@ def screen_activations(
             split=split,
             use_center_crop=True,
             use_resize_output=True,
-            use_grayscale=True if model in ['v1', 'v4g'] else False,
+            use_grayscale=grayscale,
             use_normalize=True,
-            use_mask=True,
+            use_mask=masked,
             use_crop_to_mask=False,
-            use_norm=True,
+            use_norm=masked,
             use_clip=False,
             use_experiment_frame=use_experiment_frame,
             mask=mask,
             num_channels=num_channels,
             output_size=output_size,
-            crop_size=167 if model == 'v1' else (200 if model in ('v4', 'v4g') else 236),
+            crop_size=crop_size,
             bg_value=0.0,
             crop_padding_frac=0.05,
             clip_min=0.0,
@@ -230,12 +232,20 @@ def screen_activations(
             img_std=img_std,
         )
 
+    # Optional uniform subset (e.g. 200k ImageNet for the full-field population axis); a fixed seed
+    # means every twin screens the same images. Sorted indices are remapped to global ids after sorting.
+    subset_indices = None
+    if n_sample is not None and n_sample < len(dset):
+        rng_sub = np.random.RandomState(subset_seed)
+        subset_indices = np.sort(rng_sub.choice(len(dset), size=n_sample, replace=False))
+        dset = torch.utils.data.Subset(dset, subset_indices)
+
     loader = DataLoader(
-        dset, 
-        batch_size=batch_size, 
-        shuffle=False, 
+        dset,
+        batch_size=batch_size,
+        shuffle=False,
         num_workers=num_workers,
-        pin_memory=True
+        pin_memory=True,
     )
     
     _, neurons = get_layer_info(
@@ -256,7 +266,7 @@ def screen_activations(
         ensure_dir(Path(log_path).parent)
         log_file = open(log_path, "w")
         log_file.write(
-            f"screen model={model} dataset={dataset} images={len(loader.dataset)} "
+            f"screen {area}/{backbone} dataset={dataset} images={len(loader.dataset)} "
             f"neurons={len(neurons)} batch_size={batch_size}\n"
         )
         log_file.flush()
@@ -270,7 +280,7 @@ def screen_activations(
             file=progress_file,
             mininterval=log_every,
             ncols=100,
-            desc=f"screen {model} {dataset}",
+            desc=f"screen {area}/{backbone} {dataset}",
         )):
             output = function(scenes.to(device))
             output = get_spatial_activation(
@@ -284,6 +294,8 @@ def screen_activations(
     resps, idx = torch.sort(outs, dim=0)
     sresps = resps.numpy()
     sidx = idx.numpy()
+    if subset_indices is not None:                 # subset positions -> global image ids
+        sidx = subset_indices[sidx]
 
     def _finish(msg):
         if log_file is not None:
@@ -299,13 +311,14 @@ def screen_activations(
         return sresps, sidx
 
     ensure_dir(output_dir)
+    regime = "" if masked else "fullfield_"   # full-field files carry the regime, masked keep the name
 
     if save_format == "npz":
-        # One npz per (responses | indices), keyed by unit_{neuron_id}, each value a
-        # per-neuron array sorted ascending
-        # (e.g. v4_ensemble_rendered_ordered_responses.npz / ..._indices.npz).
-        resp_path = os.path.join(output_dir, f"{model}_{tag}_{dataset}_ordered_responses.npz")
-        idx_path = os.path.join(output_dir, f"{model}_{tag}_{dataset}_ordered_indices.npz")
+        # One npz per (responses | indices), keyed by unit_{neuron_id}, each value a per-neuron array
+        # sorted ascending. Bare, folder-namespaced under ANALYSIS_DIR/{area}/{backbone}/
+        # (e.g. ensemble_rendered_ordered_responses.npz, ensemble_imagenet_fullfield_ordered_*.npz).
+        resp_path = os.path.join(output_dir, f"{tag}_{dataset}_{regime}ordered_responses.npz")
+        idx_path = os.path.join(output_dir, f"{tag}_{dataset}_{regime}ordered_indices.npz")
         np.savez(resp_path, **{f"unit_{unit}": sresps[:, i] for i, unit in enumerate(neurons)})
         np.savez(idx_path, **{f"unit_{unit}": sidx[:, i] for i, unit in enumerate(neurons)})
         print(f"saved {resp_path}")
@@ -314,10 +327,10 @@ def screen_activations(
         return
 
     elif save_format == "npy":
-        # Per-neuron .npy files in two folders ({model}_{tag}_{layer}_{dataset}_ordered_*).
+        # Per-neuron .npy files in two folders ({tag}_{layer}_{dataset}_ordered_*).
         layer_name = layer if layer is not None else "output"
-        endrespdir = os.path.join(output_dir, f"{model}_{tag}_{layer_name}_{dataset}_ordered_responses")
-        idxdir = os.path.join(output_dir, f"{model}_{tag}_{layer_name}_{dataset}_ordered_indices")
+        endrespdir = os.path.join(output_dir, f"{tag}_{layer_name}_{dataset}_{regime}ordered_responses")
+        idxdir = os.path.join(output_dir, f"{tag}_{layer_name}_{dataset}_{regime}ordered_indices")
         ensure_dir(endrespdir)
         ensure_dir(idxdir)
         for i, unit in tqdm(enumerate(neurons), total=len(neurons)):
@@ -338,26 +351,33 @@ if __name__ == "__main__":
             "DATA_DIR=/path/to/your/data (ImageNet caches to DATA_DIR/datasets)."
         )
     parser = argparse.ArgumentParser(description="Get DERS")
+    parser.add_argument("--area", type=str, required=True, choices=registry.AREAS, help="recorded area")
+    parser.add_argument("--backbone", type=str, required=True, choices=registry.BACKBONES, help="twin backbone")
+    parser.add_argument("--weights_dir", type=str, default=None, help="trained-ensemble dir (default: staged for resnet/convnext; TRAINED_MODELS_DIR/{area}/{backbone} for dino)")
     parser.add_argument("--data_dir", type=str, default=None, help="Image source (default RENDERED_DIR for rendered, IMAGENET_CACHE_DIR for imagenet)")
-    parser.add_argument("--output_dir", type=str, default=None, help="Where ordered responses/indices are saved (default ANALYSIS_DIR/{model})")
+    parser.add_argument("--output_dir", type=str, default=None, help="Where ordered responses/indices are saved (default ANALYSIS_DIR/{area}/{backbone})")
     parser.add_argument("--token", type=str, default=TOKEN, help="Huggingface token for imagenet")
     parser.add_argument("--split", type=str, default="train", help="train, validation, or test")
     parser.add_argument("--dataset", type=str, default="imagenet", help="rendered or imagenet")
+    parser.add_argument("--field", type=str, default="masked", choices=["masked", "full"],
+                        help="'masked' (RF mask + L2 norm, MAI/LAI regime) or 'full' (full-field natural: no mask, no L2 -> needs no mask, runs first)")
+    parser.add_argument("--n_sample", type=int, default=None,
+                        help="uniform image subset to screen (e.g. 200000 for the full-field ImageNet axis); default: all")
+    parser.add_argument("--subset_seed", type=int, default=0, help="seed for --n_sample (fixed -> same images across twins)")
     parser.add_argument("--use_experiment_frame", action=argparse.BooleanOptionalAction, default=True, help="imagenet only: build the 236x420 experiment frame instead of Resize(256)")
-    parser.add_argument("--model", type=str, default="v4g", help="model architecture")
     parser.add_argument("--layer", type=str, default=None, help="layer name, if none use final layer")
     parser.add_argument("--location", default="center", help="spatial location for activation extraction")
     parser.add_argument("--ensemble", type=bool, default=True, help="use ensemble model")
     parser.add_argument("--member", type=int, default=None, help="screen a single ensemble member by index (e.g. 0); default uses the ensemble")
     parser.add_argument("--batch_size", type=int, default=64, help="batch size for dataloader")
-    parser.add_argument("--num_workers", type=int, default=0, help="number of workers for dataloader")
+    parser.add_argument("--num_workers", type=int, default=4, help="dataloader workers (>=4: the JPEG decode is the bottleneck, so 0 starves the GPU ~4x slower)")
     parser.add_argument("--save_format", type=str, default="npz", help="npz (Dryad format) or npy (per-neuron folders)")
     parser.add_argument("--device", type=str, default="cuda", help="device to run on")
-    parser.add_argument("--log_path", type=str, default=None, help="Progress log file (default LOGS_DIR/{model}_{tag}_{dataset}.log)")
+    parser.add_argument("--log_path", type=str, default=None, help="Progress log file (default LOGS_DIR/{area}/{backbone}/screening_{tag}_{dataset}.log)")
     parser.add_argument("--log_every", type=float, default=30.0, help="Min seconds between progress-line updates")
     args = parser.parse_args()
 
-    # Default output location: ANALYSIS_DIR/{model}, created on demand.
+    # Default output location: ANALYSIS_DIR/{area}/{backbone}, created on demand.
     output_dir = args.output_dir
     if output_dir is None:
         if ANALYSIS_DIR is None:
@@ -365,7 +385,7 @@ if __name__ == "__main__":
                 "ANALYSIS_DIR is not set. Set it in .env (e.g. "
                 "ANALYSIS_DIR=${DATA_DIR}/DUAL-FEATURE-ANALYSIS) or pass --output_dir."
             )
-        output_dir = os.path.join(ANALYSIS_DIR, args.model)
+        output_dir = registry.analysis_dir(args.area, args.backbone)
 
     # Default image source by dataset (RENDERED_DIR / IMAGENET_CACHE_DIR).
     data_dir = args.data_dir
@@ -383,20 +403,26 @@ if __name__ == "__main__":
         logs_dir = os.getenv("LOGS_DIR")
         if logs_dir is not None:
             tag = _run_tag(args.ensemble, args.member)
-            log_path = os.path.join(logs_dir, f"{args.model}_{tag}_{args.dataset}.log")
+            log_path = os.path.join(logs_dir, args.area, args.backbone,
+                                    f"screening_{args.field}_{tag}_{args.dataset}.log")
 
     screen_activations(
+        area=args.area,
+        backbone=args.backbone,
         data_dir=data_dir,
         output_dir=output_dir,
         token=args.token,
         split=args.split,
         dataset=args.dataset,
         use_experiment_frame=args.use_experiment_frame,
-        model=args.model,
+        field=args.field,
+        n_sample=args.n_sample,
+        subset_seed=args.subset_seed,
         layer=args.layer,
         location=args.location,
         ensemble=args.ensemble,
         member=args.member,
+        weights_dir=args.weights_dir,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         save_format=args.save_format,

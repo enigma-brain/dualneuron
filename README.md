@@ -4,546 +4,349 @@
 
 **DualNeuron** is the codebase accompanying our paper:
 
-> **Dual-feature selectivity enables bidirectional coding in visual cortical neurons**  
-> Franke K.\*, Karantzas N.\*, Willeke K., Diamantaki M., Ramakrishnan K., Bedel H.A., Elumalai P., Restivo K., Fahey P., Nealley C., Shinn T., Garcia G., Patel S., *et al.*  
-> bioRxiv (2025)  
+> **Dual-feature selectivity enables bidirectional coding in visual cortical neurons**
+> Franke K.\*, Karantzas N.\*, Willeke K., Diamantaki M., Ramakrishnan K., Bedel H.A., Elumalai P., Restivo K., Fahey P., Nealley C., Shinn T., Garcia G., Patel S., *et al.*
+> bioRxiv (2025)
 > [https://doi.org/10.1101/2025.07.16.665209](https://doi.org/10.1101/2025.07.16.665209)
 
-The data required to reproduce our results is available on Dryad:  
+The data required to reproduce our results is available on Dryad:
 [https://doi.org/10.5061/dryad.q573n5tx3](https://datadryad.org/dataset/doi:10.5061/dryad.q573n5tx3)
 
 ---
 
 ## Overview
 
-We discovered that many neurons in visual cortex exhibit **dual-feature selectivity**—they respond strongly to preferred features while being systematically suppressed by distinct non-preferred features around elevated baseline firing rates. This **bidirectional coding** strategy appears conserved across species (macaque and mouse) and visual areas (from V1 to V4).
+We discovered that many neurons in visual cortex exhibit **dual-feature selectivity** — they respond strongly to preferred features while being systematically suppressed by distinct non-preferred features around elevated baseline firing rates. This **bidirectional coding** strategy appears conserved across species (macaque and mouse) and visual areas (V1 to V4).
 
-This package provides tools to:
+This package lets you, for **any twin of choice**:
 
-- **Load digital twin models**: Pretrained neural predictive models (deep learning models trained to predict neural responses from images) for macaque V1 and V4
-- **Screen large image datasets**: Identify most-activating (MAIs) and least-activating (LAIs) natural images for each neuron
-- **Synthesize optimal stimuli**: Generate most-exciting inputs (MEIs) and least-exciting inputs (LEIs) via gradient-based optimization. The synthesis algorithm uses ideas from [https://github.com/serre-lab/Horama](https://github.com/serre-lab/Horama) for optimization in the frequency domain, though the implementation has been extended with different transforms and alternative constraints.
-- **Compute semantic axes**: Use DreamSim embeddings to analyze semantic relationships between high and low activation poles
-- **Visualize and analyze**: Plot activation curves, population statistics, and optimization trajectories
+- **Load / train digital twins** — neural predictive models for macaque V1 and V4, per `(area, backbone)`.
+- **Screen large image datasets** — find most-/least-activating images (MAIs/LAIs), in an RF-masked or a full-field regime.
+- **Synthesize optimal stimuli** — most-/least-exciting inputs (MEIs/LEIs) by gradient ascent (frequency domain for V4, pixels for V1; ideas from [Horama](https://github.com/serre-lab/Horama), extended with different transforms/constraints).
+- **Compute semantic axes** — DreamSim embeddings relating high/low activation poles.
+- **Visualize and analyze** — activation curves, population statistics, optimization trajectories, and the paper figures.
 
 ## Key Concepts
 
-### Bidirectional Neural Coding
+### Bidirectional neural coding
+Traditional views characterize neurons by what excites them. Our work reveals a **low pole** — stimuli that systematically suppress activity below baseline. The response range spans:
+- **High pole (MEI/MAI):** stimuli maximizing the response.
+- **Low pole (LEI/LAI):** stimuli minimizing it (maximal suppression).
 
-Traditional views characterize neurons by what excites them. Our work reveals that neurons also have a **low pole**—stimuli that systematically suppress activity below baseline. The full response range spans from:
+### One organizing principle: `(area, backbone)`
+Everything in the pipeline — training, screening, synthesis, DreamSim, figures — is keyed by an `(area, backbone)` **twin**. This single convention runs end to end:
 
-- **High Pole (MEI/MAI)**: Stimuli maximizing neural response
-- **Low Pole (LEI/LAI)**: Stimuli minimizing neural response (maximal suppression)
+- Every command takes **`--area {v4,v1} --backbone {resnet,dino,convnext}`** (both required).
+- Every output lives under **`{area}/{backbone}/`** — for cached features, trained weights, analysis results, figures, and logs alike.
+- A central registry, [`dualneuron/twins/registry.py`](dualneuron/twins/registry.py), is the **single source of truth**: given `(area, backbone)` it resolves the model, its geometry/normalization, its screening/synthesis constants, and where every artifact is read/written.
 
-### Digital Twin Models
+### The twins
 
-We trained neural predictive models on recordings from:
+| `--area` | `--backbone` | Model | Neurons | Input | Core | Staged? |
+|---|---|---|---|---|---|---|
+| `v4` | `resnet` | color V4 | 394 | 100×100 RGB | ResNet50 L2-robust (frozen) | ✅ shipped |
+| `v4` | `dino` | color V4 | 394 | 224×224 RGB | DINOv3 ViT-B/16 block 4 (frozen) | trained |
+| `v1` | `convnext` | grayscale V1 | 458 | 93×93 gray | ConvNeXtV2-atto (fine-tuned) | ✅ shipped |
+| `v1` | `dino` | grayscale V1 | 458 | 224×224 gray | DINOv3 ViT-B/16 block 1 (fine-tuned) | trained |
 
-| Model | Area | Neurons | Input Size | Backbone |
-|-------|------|---------|------------|----------|
-| `V1GrayTaskDriven` | Macaque V1 | 458 | 93×93 grayscale | ConvNeXtV2-Atto |
-| `V4ColorTaskDriven` | Macaque V4 | 394 | 100×100 RGB | ResNet50 L2-robust |
-| `V4GrayTaskDriven` | Macaque V4 | 1244 | 100×100 grayscale | ResNet50 L2-robust |
+The two **shipped** twins (`v4/resnet` = `V4ColorTaskDriven`, `v1/convnext` = `V1GrayTaskDriven`) come with weights, `correlations.npy` and `mask.npy` under `dualneuron/twins/`; the DINO twins are produced by [training](#training-digital-twins) (the gated DINOv3 weights are not redistributed). Each twin uses **ensemble averaging** (5 members) and a Gaussian readout.
 
-Each model uses **ensemble averaging** (5-10 models) for robust predictions and **Gaussian readouts** for spatial pooling.
+> **Staged twins are read-only.** The shipped weights / `correlations.npy` / `mask.npy` under `dualneuron/twins/` are never modified. Anything you train or regenerate is written to `TRAINED_MODELS_DIR/{area}/{backbone}/` (weights + correlations) or `ANALYSIS_DIR/{area}/{backbone}/` (a regenerated mask), never back into `twins/`.
 
 ## Installation
 
-**Requirements:** Python ≥3.10
+**Requirements:** Python ≥ 3.10
 
 ```bash
-# Install uv if you don't have it:
-#   https://docs.astral.sh/uv/getting-started/installation/
-
-# Create the virtual environment and install the package with all dependencies
-# (including a GPU-compatible torch from the configured CUDA 12.1 index)
-uv sync
-
-# Activate it (or prefix commands with `uv run`)
-source .venv/bin/activate
+# Install uv: https://docs.astral.sh/uv/getting-started/installation/
+uv sync                              # env + GPU torch (CUDA 12.1 index)
+source .venv/bin/activate            # or prefix commands with `uv run`
 ```
 
-> **Use `uv sync`.** `nnfabrik` (pinned to 0.2.2) imports `from datajoint.schemas import
-> Schema`, which DataJoint removed in 2.2, so the twins fail to import on DataJoint ≥ 2.2. The
-> lockfile pins `datajoint<2.2` (resolves to 2.1.1) to avoid this. If you install dependencies
-> manually instead of via `uv sync`, keep that constraint: `pip install "datajoint<2.2"`.
+> **Use `uv sync`.** `nnfabrik` (0.2.2) imports `from datajoint.schemas import Schema`, removed in DataJoint 2.2, so the twins fail to import on DataJoint ≥ 2.2. The lockfile pins `datajoint<2.2` (2.1.1). If you install manually, keep that constraint: `pip install "datajoint<2.2"`.
 
 ## Configuration
 
-Create a `.env` file in the repository root (copy `.env.example`):
-
-```bash
-cp .env.example .env
-```
+Copy `.env.example` to `.env` and set the paths:
 
 ```bash
 HF_TOKEN=your_huggingface_token                 # Hugging Face token (to download ImageNet)
 DATA_DIR=/path/to/your/data                     # Root data directory (see layout below)
 IMAGENET_CACHE_DIR=${DATA_DIR}/datasets         # Hugging Face ImageNet cache
 RENDERED_DIR=${DATA_DIR}/datasets/rendered      # Rendered-scene archives (batch_*.zip)
-EXPERIMENT_DIR=${DATA_DIR}/datasets/experiment  # Recordings (all_trials/) + stimuli (images_all_types/)
-MODELS_DIR=${DATA_DIR}/models                   # Cached model weights (e.g. DreamSim)
+EXPERIMENT_DIR=${DATA_DIR}/datasets/experiment  # Recordings + stimuli, per area (see below)
+MODELS_DIR=${DATA_DIR}/models                   # Cached model weights (DreamSim; gated DINOv3 in dinov3/)
 ANALYSIS_DIR=${DATA_DIR}/DUAL-FEATURE-ANALYSIS  # Regenerated screening/synthesis/DreamSim outputs
-LOGS_DIR=./logs                                 # Progress logs (one self-rewriting line per run)
+FEATURES_DIR=${DATA_DIR}/features               # Cached frozen-core features for training
+TRAINED_MODELS_DIR=${DATA_DIR}/trained_models   # User-trained twin ensembles
+LOGS_DIR=./logs                                 # Progress logs
 PAPER_FIG_DIR=./figs                            # Saved figures
 ```
 
-Directories are created on demand by the scripts that write into them; `LOGS_DIR`
-and `PAPER_FIG_DIR` are gitignored.
-
-`DATA_DIR` is the root under which the ImageNet cache, the cached model weights,
-and the Dryad data live:
+Directories are created on demand by the scripts that write into them. Every twin-specific location is
+`{area}/{backbone}/`:
 
 ```
 DATA_DIR/
-├── datasets/                  # Hugging Face ImageNet cache (IMAGENET_CACHE_DIR)
-│   ├── rendered/              # rendered-scene archives batch_*.zip (RENDERED_DIR)
-│   └── experiment/            # the experiment dataset (EXPERIMENT_DIR)
-│       ├── all_trials/        #   recorded V4 session pickles (CSRF19_V4_*.pickle)
-│       └── images_all_types/  #   presented stimuli, {id:06d}.npy
-├── models/                    # cached model weights, e.g. DreamSim (MODELS_DIR)
-├── DUAL-FEATURE-ANALYSIS/     # regenerated outputs (ANALYSIS_DIR); see "Saved-file layout"
-│   ├── v4/
-│   └── v1/
-└── dryad/                     # optional: the published Dryad release
+├── datasets/
+│   ├── rendered/                       # rendered-scene archives batch_*.zip (RENDERED_DIR)
+│   └── experiment/                     # recordings + stimuli (EXPERIMENT_DIR)
+│       ├── v4/{trials,images}          #   V4 session pickles + presented stimuli {id:06d}.npy
+│       └── v1/{trials,images}          #   V1 session pickles + presented stimuli
+├── models/dinov3/                      # gated DINOv3 backbone (hubconf repo + converted weights)
+├── DUAL-FEATURE-ANALYSIS/              # regenerated outputs (ANALYSIS_DIR)
+│   ├── v4/{resnet,dino}/               #   screening / dreamsim / similarity / mask / synthesis/
+│   └── v1/{convnext,dino}/
+├── features/                           # cached training inputs (FEATURES_DIR)
+│   ├── v4/{resnet,dino}/               #   {train,test}_features_*.npy  (frozen cores)
+│   └── v1/{convnext,dino}/             #   {train,test}_images_*.npy    (fine-tuned cores)
+└── trained_models/                     # user-trained ensembles (TRAINED_MODELS_DIR)
+    ├── v4/{resnet,dino}/               #   {area}_{backbone}_{1..5}.pth.tar + correlations.npy + mask.npy
+    └── v1/{convnext,dino}/
 ```
+
+`logs/` and `figs/` mirror this: `LOGS_DIR/{area}/{backbone}/<stage>.log` and
+`PAPER_FIG_DIR/{area}/{backbone}/<figure>.pdf`.
+
+> **Upgrading from the old flat layout?** Earlier runs wrote analysis outputs directly under
+> `ANALYSIS_DIR/{area}/` with an `{area}_` filename prefix. Relocate them into the new
+> `{area}/{backbone}/` layout (they belong to the staged twin — v4→resnet, v1→convnext) with:
+> ```bash
+> python -m dualneuron.migrate_analysis_layout            # dry run (prints the planned moves)
+> python -m dualneuron.migrate_analysis_layout --apply    # execute (idempotent, move/rename)
+> ```
 
 ### Getting ImageNet
-
-ImageNet is **not** redistributed on Dryad (its license does not allow it), so you
-download it yourself from Hugging Face. One-time setup:
-
-1. Create a Hugging Face account and request access to the gated
-   [`ILSVRC/imagenet-1k`](https://huggingface.co/datasets/ILSVRC/imagenet-1k)
-   dataset (accept its terms on that page).
-2. Create an access token and put it in `.env` as `HF_TOKEN`.
-3. The first screening run downloads ImageNet into `DATA_DIR/datasets` using the
-   token; afterwards it loads from that cache and the token is no longer needed.
-
-The download is handled transparently by `ImagenetImages` / `screen_activations`
-via `datasets.load_dataset("ILSVRC/imagenet-1k", token=..., cache_dir=DATA_DIR/datasets)`.
-The token is read from `HF_TOKEN` in `.env` automatically if you do not pass it
-explicitly.
+ImageNet is **not** redistributed on Dryad. One-time setup:
+1. Request access to the gated [`ILSVRC/imagenet-1k`](https://huggingface.co/datasets/ILSVRC/imagenet-1k) dataset.
+2. Put your token in `.env` as `HF_TOKEN`.
+3. The first screening run downloads ImageNet into `DATA_DIR/datasets` using the token; afterwards it loads from that cache.
 
 ### Getting the Dryad data
+The rendered scenes, sorted indices, and MEIs/LEIs are on Dryad
+([doi:10.5061/dryad.q573n5tx3](https://datadryad.org/dataset/doi:10.5061/dryad.q573n5tx3)); download in a browser (Dryad blocks scripted downloads):
+- rendered archives `batch_*.zip` → **`RENDERED_DIR`** (read directly, no unzip).
+- the published `.npz` are **optional** — this pipeline regenerates its own into `ANALYSIS_DIR`.
 
-The neural responses, sorted indices, MEIs/LEIs, and rendered scenes are released
-on Dryad: [https://doi.org/10.5061/dryad.q573n5tx3](https://datadryad.org/dataset/doi:10.5061/dryad.q573n5tx3).
-Dryad does not allow anonymous scripted downloads, so download the files you need
-from that page in a browser:
+### Getting the gated DINOv3 backbone (DINO twins only)
+Needed only to train/run the DINO twins. One-time setup under `MODELS_DIR/dinov3`:
+1. Accept the license and clone the hubconf repo:
+   ```bash
+   git clone https://github.com/facebookresearch/dinov3 $MODELS_DIR/dinov3/facebookresearch_dinov3_main
+   ```
+2. Accept the weights license ([`facebook/dinov3-vitb16-pretrain-lvd1689m`](https://huggingface.co/facebook/dinov3-vitb16-pretrain-lvd1689m)), then convert:
+   ```bash
+   python -m dualneuron.training.convert_dinov3_weights
+   ```
 
-- the rendered-scene archives `batch_*.zip` go in **`RENDERED_DIR`** (default
-  `${DATA_DIR}/datasets/rendered`) — `RenderedImages` reads them directly, no unzip needed
-- the published `.npz` (ordered responses/indices, MEIs/LEIs) are **optional**: this
-  pipeline regenerates its own into `ANALYSIS_DIR` (see "Reproducing the paper"), so you
-  only need them if you want to start from the released results rather than recompute them
-
-## Usage
-
-### Loading Digital Twin Models
-
-```python
-from dualneuron.twins.nets import V4ColorTaskDriven, V1GrayTaskDriven, load_model
-
-# Load V4 color model (ensemble of 5 models)
-v4_model = V4ColorTaskDriven(ensemble=True, centered=True)
-
-# Load V1 grayscale model
-v1_model = V1GrayTaskDriven(ensemble=True, centered=True)
-
-# Or use the unified loader with layer extraction
-model = load_model(
-    architecture='v4',      # 'v1', 'v4', 'v4g', or standard architectures
-    layer=None,             # Extract from specific layer (optional)
-    ensemble=True,
-    centered=True,          # Center readout for MEI synthesis
-    device='cuda'
-)
-```
-
-### Screening Large Image Datasets
-
-Identify which natural images most/least activate each neuron:
+## Loading a twin
 
 ```python
-import os
-from dotenv import load_dotenv
-from dualneuron.screening.run import screen_activations
+from dualneuron.twins.nets import load_model
 
-load_dotenv()  # reads HF_TOKEN and DATA_DIR from .env
-data_dir = os.path.join(os.environ["DATA_DIR"], "datasets")  # ImageNet cache
-
-# Screen ImageNet to find MAIs/LAIs (token read from .env if omitted)
-sorted_responses, sorted_indices = screen_activations(
-    data_dir=data_dir,
-    token=os.getenv("HF_TOKEN"),
-    split='train',
-    dataset="imagenet",     # or "rendered" for synthetic scenes
-    model='v4',             # 'v1', 'v4', or 'v4g'
-    batch_size=128,
-    device='cuda'
-)
-
-# sorted_indices[:, neuron_id][:10]  → LAIs (lowest 10)
-# sorted_indices[:, neuron_id][-10:] → MAIs (highest 10)
+# staged twins (weights_dir=None -> GitHub-staged):
+m = load_model("v4", ensemble=True, centered=False)                                    # v4/resnet
+m = load_model("v1", ensemble=True, centered=False)                                    # v1/convnext
+# trained twins (weights_dir=None -> TRAINED_MODELS_DIR/{area}/{backbone}):
+m = load_model("v4_dino", ensemble=True)                                               # v4/dino
+m = load_model("v1_dino", ensemble=True)                                               # v1/dino
+# or point at any trained ensemble:
+m = load_model("v4", ensemble=True, weights_dir=".../trained_models/v4/resnet")
 ```
 
-### Synthesizing MEIs and LEIs
+`centered=True` sets the readout to image center (for MEI synthesis); `centered=False` keeps the learned
+receptive-field positions (for predicting recorded responses).
 
-Generate optimal stimuli via gradient ascent:
+## Training digital twins
 
-```python
-from dualneuron.synthesis.ascend import fourier_ascending, pixel_ascending
+Twins are trained per `(area, backbone)`. Two regimes, chosen automatically from the twin:
 
-# For V4 (color): Fourier-parameterized synthesis with natural priors
-result = fourier_ascending(
-    objective_function=lambda x: model(x)[:, neuron_id].mean(),
-    magnitude_path='natural_rgb.npy',  # Natural image frequency prior
-    total_steps=128,
-    learning_rate=1.0,
-    values_range=(-2.0, 2.0),
-    target_norm=40.0,
-    device='cuda',
-    verbose=True
-)
-
-# For V1 (grayscale): Direct pixel optimization
-result = pixel_ascending(
-    objective_function=lambda x: model(x)[:, neuron_id].mean(),
-    image_size=93,
-    channels=1,
-    total_steps=128,
-    learning_rate=0.05,
-    target_norm=12.0,
-    device='cuda'
-)
-
-mei = result['image']           # Synthesized image
-alpha = result['alpha']         # Saliency/transparency map
-activation = result['activation']  # Final activation value
-```
-
-### Batch Generation of MEIs/LEIs
-
-Generate MEIs and LEIs for all neurons:
-
-```python
-# Run one area per process (each on its own GPU); resumable, one npz per neuron:
-#   CUDA_VISIBLE_DEVICES=0 python -m dualneuron.synthesis.generate --area v4
-#   CUDA_VISIBLE_DEVICES=1 python -m dualneuron.synthesis.generate --area v1
-
-from dualneuron.synthesis.generate import generate
-
-generate(
-    area="v4",           # "v4" or "v1"
-    num_seeds=10,        # random initializations per neuron
-    neurons=None,        # default: the well-predicted set (correlation-to-average > 0.4)
-)
-# -> ANALYSIS_DIR/v4/synthesis/v4_neuron{id:04d}.npz
-#    (mei/lei image, alpha, and activation for each seed)
-```
-
-### Semantic Analysis with DreamSim
-
-Compute semantic axes between activation poles:
-
-```python
-from dualneuron.dream.axis import semantic_axis
-from dualneuron.dream.sim import embeddings
-from dreamsim import dreamsim
-
-# Load DreamSim model
-dreamsim_model, _ = dreamsim(pretrained=True, device='cuda')
-
-# Compute semantic axis from MAIs to LAIs
-axis = semantic_axis(
-    images1=mai_images,    # High-activating images
-    images2=lai_images,    # Low-activating images
-    dreamsim_model=dreamsim_model
-)
-
-# Use axis to guide synthesis toward semantic concepts
-result = fourier_ascending(
-    objective_function=objective,
-    simulation_function=dreamsim_model.embed,
-    simulation_axis=axis,
-    simulation_weight=0.5,  # Weight for semantic guidance
-    ...
-)
-```
-
-### Visualization
-
-```python
-from dualneuron.synthesis.visualize import plot_poles, blend, sequence_animation
-from dualneuron.screening.visualize import plot_neuron_activation, plot_neuron_poles
-
-# Plot MEI/LEI pair with activation curves
-plot_poles(
-    images=[lei_image, mei_image],
-    activations=[lei_activations, mei_activations]
-)
-
-# Blend image with saliency map
-blended = blend(image, alpha, mean=0.45, std=0.25)
-
-# Animate optimization trajectory
-animation = sequence_animation(
-    imgs=all_step_images,
-    activities=all_step_activations,
-    title="MEI Synthesis"
-)
-
-# Plot sorted activation curve for a neuron
-plot_neuron_activation(neuron_id=42, resp_dir="responses/", response_stats=stats)
-```
-
-## Package Structure
-
-```
-dualneuron/
-├── utils.py                # Shared helpers: env_dir, ensure_dir, RewriteLine (logs),
-│                           #   well_predicted_neurons (corr>0.4), sparse_split (skewness<2)
-├── twins/                  # Digital twin neural predictive models
-│   ├── nets.py            # Model loaders (V1GrayTaskDriven, V4ColorTaskDriven, EnsembleModel)
-│   ├── activations.py     # Activation extraction utilities
-│   ├── V1GrayTaskDriven/  # V1 weights + mask.npy (RF) + correlations.npy
-│   ├── V4ColorTaskDriven/ # V4 color weights + mask.npy + correlations.npy
-│   └── V4GrayTaskDriven/  # V4 grayscale weights & metadata
-│
-├── screening/              # Large-scale image screening (MAIs/LAIs)
-│   ├── run.py             # screen_activations; --member i for a single ensemble member
-│   ├── sets.py            # ImageNet & rendered dataset loaders / transforms
-│   ├── utils.py           # Statistics (Gini coefficient, adaptive sampling)
-│   └── visualize.py       # Population & single-neuron visualizations
-│
-├── synthesis/              # Stimulus optimization (MEIs/LEIs)
-│   ├── ascend.py          # Fourier (V4) & pixel (V1) gradient ascent
-│   ├── generate.py        # Per-neuron MEI/LEI generation (resumable)
-│   ├── mask.py            # Build the RF mask from the MEIs/LEIs -> twins/{model}/mask.npy
-│   ├── ops.py             # Image ops (create_crops, create_neural_crops, norm, ...)
-│   ├── visualize.py       # Optimization trajectory visualization
-│   └── priors/            # Natural image magnitude spectra (natural_{gray,rgb}.npy)
-│
-├── dream/                  # DreamSim embedding analysis
-│   ├── sim.py             # DreamSim embedding extraction (fp16, per-area defaults)
-│   ├── subset.py          # Build the per-area ImageNet embedding subset
-│   ├── similarity.py      # MAI/LAI coherence d-prime (Fig 6), 2D similarity space (Fig 9)
-│   └── axis.py            # Semantic axis computation (synthesis guidance)
-│
-├── data/                   # Recorded neuronal data (macaque V4; there are no V1 recordings)
-│   └── recordings.py      # load_sessions / build_response_matrix / recorded_responses;
-│                          #   reads EXPERIMENT_DIR/all_trials; SESSION_ORDER aligns neurons to
-│                          #   correlations.npy (sum time-bins 2:, mean over repeats)
-│
-└── figures/                # Paper figure generation (PDFs -> PAPER_FIG_DIR)
-    ├── make_fig_accuracy.py     # Fig 1c  — prediction accuracy (single-trial + corr-to-avg, 0.4)
-    ├── make_fig_sparsity.py     # Fig 2   — skewness continuum (model vs recorded, distribution)
-    ├── neuron_strips.py         # Figs 4-5 — MAI/LAI natural-image strips per neuron
-    ├── make_fig_mei_lei.py      # Figs 4-5 — synthesized LEI/MEI seed strips per neuron (blend)
-    ├── make_fig_dreamsim.py     # Fig 6 (coherence d-prime) + Fig 9 (2D similarity space)
-    ├── make_fig_verify_data.py  # Fig 7   — recorded-response percentile verification
-    ├── make_fig_population.py   # Fig 10  — shared selectivity across the population (+ cross-animal)
-    └── make_fig_simulated.py    # Suppl. Fig 4 — simulated simple/complex Gabor cells
-```
-
-## Reproducing the paper — pipeline, runs, and status
-
-Figures are produced along two tracks. The **model track** is one dependency chain — each stage's
-output feeds the next:
-
-**synthesis → acquire mask → screening → DreamSim → similarity (d-prime + R² vs. sparsity) → figures**
-
-The **recorded track** loads the macaque V4 recordings (`data/recordings.py`, reading
-`EXPERIMENT_DIR`) and compares them to the twins: Fig 1c accuracy and Fig 7 verification need only
-the twin + recordings, while Fig 2 (model-vs-recorded skewness) and Fig 10 (population) also consume
-the screening output. The two tracks meet in the figures, which run in the paper's order — see the
-**Paper → code** and **Commands** sections below.
-
-1. **Synthesis** (`synthesis/`). Gradient ascent on the centered ensemble twins produces,
-   per well-predicted neuron, a most-exciting input (MEI) and a least-exciting input (LEI):
-   V4 in the Fourier phase domain (`fourier_ascending`, natural-amplitude prior), V1 in
-   pixels (`pixel_ascending`), 10 seeds each, ℓ2-constrained (40 V4 / 12 V1). One npz per neuron.
-2. **Acquire mask** (`synthesis/mask.py`). Each area's receptive-field mask is built from the
-   **mean alpha over all its synthesized MEIs/LEIs**: threshold at the ~77.5th percentile (the
-   RF core), then Gaussian-soften the binary edge (σ ≈ 1.3). Stored at
-   `dualneuron/twins/{model}/mask.npy`, it is the shared input to both screening and DreamSim,
-   so each evaluates exactly the retinotopic region its neuron drives. The script reproduces the
-   shipped masks (correlation 0.996 V4 / 0.992 V1; only a ~1-px edge ring differs).
-3. **Screening** (`screening/`). Every image is RF-masked (bg 0) and ℓ2-normalized, run through
-   the twins, and sorted per neuron to give MAIs/LAIs. Sources: 200,000 rendered scenes and the
-   full 1,281,167 ImageNet-1k train images. Use the **ensemble** (default) or a single
-   **member** (`--member i`).
-4. **DreamSim** (`dream/sim.py`, `dream/subset.py`). Each image is RF-masked (neutral-gray
-   bg 0.45), contrast-normalized, and embedded into the 1792-d DreamSim ensemble space
-   (penultimate layer, unit-norm, fp16). Rendered = all 200k; ImageNet = a subset from
-   `subset.py` (every neuron's K=15 MAIs+LAIs ∪ a 200k uniform sample), passed via `--indices_path`.
-5. **Similarity** (`dream/similarity.py`). Embeddings are **globally centered** before every
-   cosine (à la Franke — this removes the common-mode and is what gives d-prime/R² their range).
-   **Fig 6 d-prime** (within-MAI / within-LAI cosine coherence vs. random, ddof = 1) and **Fig 9
-   2D similarity space** (each image's mean cosine to a neuron's 15 MAI / 15 LAI poles → degree-1
-   linear-fit R², with random-pole controls), over **all** well-predicted neurons and related to
-   each neuron's **skewness** so R²/d-prime form a continuous spectrum across sparsity (skewness =
-   2 is only a soft boundary; `utils.sparse_split`). The linear model is CV-validated — a degree-2
-   surface adds only a median ~1% R². V4 non-sparse R² ≈ 0.28 (rendered), matching Franke's 0.23.
-   ImageNet is **our extension** (Franke reports rendered only); its R² is computed over the
-   embedded subset (the constant ~205k/209k set), not all of ImageNet-1k.
-6. **Figures** (`figures/`). `make_fig_dreamsim.py` → Fig 6 (population coherence distributions +
-   d-prime scatter) and Fig 9 (example 2D spaces with the activity-gradient arrow and its 1D
-   projection, the R² histogram, and the R²-vs-control scatter), both areas × datasets.
-   `neuron_strips.py` → per-area MAI/LAI natural-image strips across the sparsity range (the same
-   four neurons per area: 4, 5, most non-sparse, most sparse), and `make_fig_mei_lei.py` → the
-   synthesized LEI/MEI seed strips for those same neurons (`synthesis.visualize.blend`). These
-   serve the Figs 3–5 examples. All write PDFs to `PAPER_FIG_DIR`.
-
-### Paper → code (in the order the paper unfolds)
-
-| Paper figure | Produced by | Inputs / regime |
-|---|---|---|
-| **Fig 1** — twins + inclusion (corr-to-avg > 0.4) | `twins/nets.py`, `utils.well_predicted_neurons` | — |
-| **Fig 1c** — prediction accuracy (single-trial + corr-to-avg) | `figures/make_fig_accuracy.py` | recordings + twin eval (**`centered=False`**) |
-| **Fig 2** — sparseness continuum (skewness < 2; model vs recorded) | `figures/make_fig_sparsity.py` (`utils.sparse_split`, `data.recordings`) | screening skewness + recorded skewness |
-| **Figs 3–5** — MEIs/LEIs + MAIs/LAIs | `synthesis/generate.py` → `synthesis/mask.py` → `screening/run.py` | synthesis + screening (**`centered=True`**, RF-masked) |
-| **Figs 3–5** — plotting | `figures/neuron_strips.py` + `figures/make_fig_mei_lei.py` | — |
-| **Fig 6** — DreamSim MAI/LAI d-prime | `dream/sim.py` + `dream/similarity.py` → `figures/make_fig_dreamsim.py` | DreamSim (RF-masked, bg 0.45) |
-| **Fig 7** — recorded-response verification (non-sparse vs sparse) | `figures/make_fig_verify_data.py` | recordings + twin eval (`centered=False`) |
-| **Fig 9** — 2D similarity space, R² vs sparsity | `dream/similarity.py` → `figures/make_fig_dreamsim.py` | DreamSim |
-| **Fig 10** — population shared selectivity (+ cross-animal) | `figures/make_fig_population.py` | ImageNet screening + `subject_id` from recordings |
-| **Suppl. Fig 4** — simulated simple/complex cells | `figures/make_fig_simulated.py` | rendered scenes (Gabor; no twin) |
-
-Deferred: Fig 2e,f baseline firing (awaiting the gray-screen window), Fig 8 independent evaluator, Fig 11 mouse. **V4 only** for the recorded panels (no V1 recordings in this release).
-
-**Two evaluation regimes — keep them straight.** Figures that predict *recorded* responses to the
-actual stimuli (Fig 1c, Fig 7) use the twin with **learned readout positions** (`centered=False`)
-and the training transform `CenterCrop(200) → Resize(100, bicubic) → z-score 113.5/59.58` (no RF
-mask / L2 norm). The *screening / MAI-LAI* figures (Fig 2 model side, 6, 9, 10) use the **centered,
-RF-masked, L2-normed** screening responses (`centered=True`).
-
-### Commands (install → analysis)
+- **Frozen core** (`v4/resnet`, `v4/dino`): the core is frozen, so its feature maps are extracted **once**
+  to `FEATURES_DIR/{area}/{backbone}/` and only the readout (+ a BatchNorm) is trained on the cache.
+- **Fine-tuned core** (`v1/convnext`, `v1/dino`): the backbone is fine-tuned end-to-end (DINO tunes only
+  its stem + blocks up to the read-out block, via a truncated forward), so the fixed **input images** are
+  cached instead and the whole thing trains on them.
 
 ```bash
-uv sync                                    # env + GPU torch (cu121)
-
-# Synthesis — one area per GPU; resumable
-CUDA_VISIBLE_DEVICES=0 python -m dualneuron.synthesis.generate --area v4
-CUDA_VISIBLE_DEVICES=1 python -m dualneuron.synthesis.generate --area v1
-
-# Acquire mask — from the synthesized MEIs/LEIs (-> twins/{model}/mask.npy; prints corr vs shipped)
-python -m dualneuron.synthesis.mask --area v4
-python -m dualneuron.synthesis.mask --area v1
-
-# Screening — ensemble (drop --member); a single member with --member i
-CUDA_VISIBLE_DEVICES=0 python -m dualneuron.screening.run --model v4 --dataset rendered --num_workers 4
-CUDA_VISIBLE_DEVICES=0 python -m dualneuron.screening.run --model v4 --dataset imagenet --num_workers 4
-
-# DreamSim — build the ImageNet subset (ImageNet only), then embed
-python -m dualneuron.dream.subset --area v4
-CUDA_VISIBLE_DEVICES=1 python -m dualneuron.dream.sim --dataset rendered --area v4 --num_workers 4
-CUDA_VISIBLE_DEVICES=1 python -m dualneuron.dream.sim --dataset imagenet --area v4 --num_workers 4 \
-    --indices_path "$ANALYSIS_DIR/v4/v4_dreamsim_imagenet_indices.npy"
-
-# Similarity — Fig 6 + Fig 9 (per model × dataset; saves {model}_similarity_{dataset}.npz)
-python -m dualneuron.dream.similarity --model v4 --dataset rendered --output "$ANALYSIS_DIR/v4/v4_similarity_rendered.npz"
-
-# Figures (into PAPER_FIG_DIR) — in the paper's order. The recorded-data figures
-# (accuracy, sparsity, verify_data, population) read EXPERIMENT_DIR via dualneuron.data.recordings.
-python -m dualneuron.figures.make_fig_accuracy      # Fig 1c   prediction accuracy (V4; recordings + twin)
-python -m dualneuron.figures.make_fig_sparsity      # Fig 2    skewness continuum (V4; needs screening + recordings)
-python -m dualneuron.figures.neuron_strips          # Figs 4-5 MAI/LAI strips (both areas × datasets)
-python -m dualneuron.figures.make_fig_mei_lei       # Figs 4-5 synthesized LEI/MEI seed strips (both areas)
-python -m dualneuron.figures.make_fig_dreamsim      # Fig 6 + Fig 9 (both areas × datasets)
-python -m dualneuron.figures.make_fig_verify_data   # Fig 7    recorded-response verification (V4; recordings + twin)
-python -m dualneuron.figures.make_fig_population    # Fig 10   population shared selectivity (V4; needs ImageNet screening)
-python -m dualneuron.figures.make_fig_simulated     # Suppl. Fig 4  simulated simple/complex cells (rendered)
+python -m dualneuron.training.run --area v4 --backbone resnet
+python -m dualneuron.training.run --area v4 --backbone dino     # needs the gated DINOv3 backbone
+python -m dualneuron.training.run --area v1 --backbone convnext
+python -m dualneuron.training.run --area v1 --backbone dino
+# multi-GPU: one member per GPU (parent caches once, pool trains, then aggregates)
+python -m dualneuron.training.run --area v4 --backbone dino --gpus 0,1,2,3,4
+# evaluate a trained ensemble (single-trial + correlation-to-average vs the twin's correlations.npy)
+python -m dualneuron.training.eval_ensemble --area v4 --backbone dino
 ```
 
-The commands above show V4; repeat screening, DreamSim, and similarity with `--area v1` /
-`--model v1` (and `--dataset imagenet`) for the full set. Per-area transforms (crop, channels,
-grayscale, contrast norm) are set automatically from `--area`/`--model` — e.g. crop 200 (V4) /
-167 (V1) so the RF mask aligns with the screening.
+Each run writes `{area}_{backbone}_{1..5}.pth.tar` + `correlations.npy` + `mask.npy` to
+`TRAINED_MODELS_DIR/{area}/{backbone}/`. Heads mirror the area's task-driven twin (V4 → BatchNorm→ReLU;
+V1 → BatchNorm→GELU) with output `ELU(x−1)+1`; loss is a NaN-masked Poisson NLL + `gamma·mean|readout|`
+(`gamma_readout` per twin: V4 = 3.0, V1 = 10). Logs go to `LOGS_DIR/{area}/{backbone}/`.
 
-### Saved-file layout (anticipated names)
+## Reproducing the paper — the pipeline
+
+Two tracks meet in the figures. The **model track** is one dependency chain per twin:
+
+**synthesis → mask → screening → DreamSim → similarity → figures**
+
+The **recorded track** compares a twin's predictions to the macaque recordings (`data/recordings.py`,
+reading `EXPERIMENT_DIR/{area}`): Fig 1c accuracy and Fig 7 verification need only the twin + recordings;
+Fig 2 (skewness) and Fig 10 (population) also consume the screening output.
+
+1. **Synthesis** (`synthesis/generate.py`). Gradient ascent on the **centered** ensemble produces, per
+   well-predicted neuron, an MEI and an LEI (V4 in the Fourier phase domain with a natural-amplitude
+   prior; V1 in pixels), 10 seeds each, ℓ2-constrained. One npz per neuron.
+2. **Mask** (`synthesis/mask.py`). Each twin's RF mask is the **mean alpha over its MEIs/LEIs**,
+   thresholded (~77.5th pct) and Gaussian-softened. Written to the **non-staged**
+   `ANALYSIS_DIR/{area}/{backbone}/mask.npy` (for a shipped twin it reproduces the staged mask, reported
+   as a QC comparison — the staged mask is never overwritten).
+3. **Screening** (`screening/run.py`). Two regimes:
+   - **`--field masked`** (default): each image is RF-masked (bg 0) and ℓ2-normed, run through the twin,
+     sorted per neuron → MAIs/LAIs. This is the paper's MAI/LAI regime.
+   - **`--field full`**: **full-field natural** — no mask, no ℓ2 (only the twin's z-score + crop/resize).
+     It needs **no mask**, so it can run first (e.g. on a freshly trained twin), and gives the natural
+     population responses used to place neurons on their MAI↔LAI axes. Pair with `--n_sample 200000` for
+     a fixed uniform ImageNet subset.
+   Use the ensemble (default) or a single member (`--member i`).
+4. **DreamSim** (`dream/sim.py`, `dream/subset.py`). Each image is RF-masked (neutral-gray bg 0.45),
+   contrast-normalized, and embedded into the 1792-d DreamSim ensemble space. Rendered = all 200k;
+   ImageNet = a per-twin subset (`subset.py`, `--indices_path`).
+5. **Similarity** (`dream/similarity.py`). Globally centered cosine → **Fig 6 d′** (within-MAI/LAI
+   coherence vs random) and **Fig 9 2D similarity space** (R² of activity vs the MAI/LAI cosine plane),
+   over all well-predicted neurons, related to each neuron's skewness (`registry.sparse_split`).
+6. **Figures** (`figures/`). Per-twin PDFs to `PAPER_FIG_DIR/{area}/{backbone}/` (see the table).
+
+### Paper → code
+
+| Paper figure | Produced by | Regime |
+|---|---|---|
+| **Fig 1c** — prediction accuracy (single-trial + corr-to-avg) | `figures/make_fig_accuracy.py` | recordings + twin (`centered=False`) |
+| **Fig 2** — sparseness continuum (model vs recorded skewness) | `figures/make_fig_sparsity.py` | screening + recordings |
+| **Figs 3–5** — MEIs/LEIs + MAIs/LAIs | `synthesis/generate.py` → `synthesis/mask.py` → `screening/run.py` | synthesis + masked screening (`centered=True`) |
+| **Figs 3–5** — plotting | `figures/neuron_strips.py` + `figures/make_fig_mei_lei.py` | — |
+| **Fig 6** — DreamSim MAI/LAI d′ (per twin) | `dream/sim.py` + `dream/similarity.py` → `figures/make_fig_dreamsim.py` | DreamSim |
+| **Fig 7** — recorded-response verification | `figures/make_fig_verify_data.py` | recordings + twin (`centered=False`) |
+| **Fig 9** — 2D similarity space, R² vs sparsity | `dream/similarity.py` → `figures/make_fig_dreamsim.py` | DreamSim |
+| **Fig 10** — population shared selectivity | `figures/make_fig_population.py` | ImageNet screening + `subject_id` |
+| **Suppl. Fig 4** — simulated simple/complex cells | `figures/make_fig_simulated.py` | rendered scenes (Gabor; no twin) |
+
+**Two evaluation regimes — keep them straight.** Figures that predict *recorded* responses to the actual
+stimuli (Fig 1c, Fig 7) use the twin with **learned readout positions** (`centered=False`) and the
+training transform (crop → resize → z-score; no RF mask / ℓ2). The *screening / MAI-LAI* figures (Fig 2
+model side, 6, 9, 10) use the **centered, RF-masked, ℓ2-normed** screening (`centered=True`).
+
+### Commands (per twin)
+
+Every command takes `--area --backbone`. Example for `v4/resnet`; swap in any twin:
+
+```bash
+# Synthesis (one twin per GPU; resumable) + mask
+CUDA_VISIBLE_DEVICES=0 python -m dualneuron.synthesis.generate --area v4 --backbone resnet
+python -m dualneuron.synthesis.mask --area v4 --backbone resnet
+
+# Screening — masked (MAI/LAI regime), ensemble; add --member i for one member
+python -m dualneuron.screening.run --area v4 --backbone resnet --dataset rendered --num_workers 4
+python -m dualneuron.screening.run --area v4 --backbone resnet --dataset imagenet --num_workers 4
+# Screening — full-field natural (no mask, needs none), 200k ImageNet subset (population axis)
+python -m dualneuron.screening.run --area v4 --backbone resnet --dataset imagenet --field full --n_sample 200000
+
+# DreamSim — build the ImageNet subset, then embed both datasets
+python -m dualneuron.dream.subset --area v4 --backbone resnet
+python -m dualneuron.dream.sim --area v4 --backbone resnet --dataset rendered --num_workers 4
+python -m dualneuron.dream.sim --area v4 --backbone resnet --dataset imagenet --num_workers 4 \
+    --indices_path "$ANALYSIS_DIR/v4/resnet/dreamsim_imagenet_indices.npy"
+
+# Similarity (Fig 6 + Fig 9 inputs; auto-saves similarity_{dataset}.npz)
+python -m dualneuron.dream.similarity --area v4 --backbone resnet --dataset rendered
+
+# Figures (into PAPER_FIG_DIR/{area}/{backbone}); recorded-track ones also read EXPERIMENT_DIR
+python -m dualneuron.figures.make_fig_accuracy      --area v4 --backbone resnet   # Fig 1c
+python -m dualneuron.figures.make_fig_sparsity      --area v4 --backbone resnet   # Fig 2
+python -m dualneuron.figures.neuron_strips          --area v4 --backbone resnet   # Figs 4-5 (both datasets)
+python -m dualneuron.figures.make_fig_mei_lei       --area v4 --backbone resnet   # Figs 4-5
+python -m dualneuron.figures.make_fig_dreamsim      --area v4 --backbone resnet   # Fig 6 + Fig 9
+python -m dualneuron.figures.make_fig_verify_data   --area v4 --backbone resnet   # Fig 7
+python -m dualneuron.figures.make_fig_population     --area v4 --backbone resnet   # Fig 10
+python -m dualneuron.figures.make_fig_simulated                                    # Suppl. Fig 4 (no twin)
+```
+
+Per-twin geometry (crop, channels, grayscale, contrast norm, RF mask) is resolved automatically from the
+registry — e.g. crop 200 (V4) / 167 (V1), 224px inputs for the DINO twins.
+
+### Saved-file layout
 
 ```
-ANALYSIS_DIR/
-├── v4/
-│   ├── v4_ensemble_rendered_ordered_{responses,indices}.npz   # screening (ensemble)
-│   ├── v4_ensemble_imagenet_ordered_{responses,indices}.npz
-│   ├── v4_member0_imagenet_ordered_{responses,indices}.npz    # single-member screening
-│   ├── v4_dreamsim_rendered_embeddings.npz                    # DreamSim (fp16, 1792-d)
-│   ├── v4_dreamsim_imagenet_embeddings.npz
-│   ├── v4_dreamsim_imagenet_indices.npy                       # ImageNet subset (subset.py)
-│   ├── v4_similarity_{rendered,imagenet}.npz                  # similarity: per-neuron d-prime, R², controls, skewness
-│   └── synthesis/
-│       └── v4_neuron{id:04d}.npz                              # MEI/LEI: image, alpha, activation × 10 seeds
-└── v1/                                                        # same scheme (grayscale, crop 167)
+ANALYSIS_DIR/{area}/{backbone}/
+├── ensemble_{rendered,imagenet}_ordered_{responses,indices}.npz         # masked screening
+├── ensemble_imagenet_fullfield_ordered_{responses,indices}.npz         # full-field screening
+├── member{i}_{dataset}_ordered_{responses,indices}.npz                  # single-member screening
+├── dreamsim_{rendered,imagenet}_embeddings.npz  +  dreamsim_imagenet_indices.npy
+├── similarity_{rendered,imagenet}.npz                                   # d′, R², controls, skewness
+├── mask.npy                                                             # this twin's regenerated RF mask
+└── synthesis/neuron{id:04d}.npz                                         # MEI/LEI: image, alpha, activation ×10
 ```
 
-The RF mask is written back to `dualneuron/twins/{model}/mask.npy` (`synthesis/mask.py`), and the
-Fig 6 / Fig 9 PDFs to `PAPER_FIG_DIR` (`dreamsim_dprime_{dataset}.pdf`,
-`dreamsim_similarity_{area}_{dataset}.pdf`, plus the `mask_reconstruction.pdf` QC).
+Bare, folder-namespaced filenames (the `{area}/{backbone}/` folder carries the identity). Figures mirror
+this: `PAPER_FIG_DIR/{area}/{backbone}/{fig_accuracy,fig_sparsity,dreamsim_dprime_{dataset},...}.pdf`
+(`make_fig_simulated` has no twin and stays flat in `PAPER_FIG_DIR/`). Logs:
+`LOGS_DIR/{area}/{backbone}/{screening_*,synthesis,mask,dreamsim_*,similarity_*,train,...}.log`.
 
-General scheme: `{area}_{run}_{dataset}_{kind}`, with `run ∈ {ensemble, member{i}}` and
-`dataset ∈ {rendered, imagenet}`. Logs mirror it under `LOGS_DIR/`
-(`{area}_{run}_{dataset}.log`, `{area}_synthesis.log`, `{area}_dreamsim_{dataset}.log`).
+### Equipment, concurrency, observed times
 
-### Equipment, concurrency, and observed times
+Hardware: 5 × 24 GB GPUs; a 100 GiB-RAM / 4-CPU-core cgroup. Run **one twin per GPU** and use
+`--num_workers 4` (default) — the data loaders are JPEG-decode-bound and 4 workers saturate the 4 cores.
 
-Hardware: 5 × 24 GB GPUs; a 100 GiB-RAM / 4-CPU-core cgroup. We run **one area per GPU** and use
-`--num_workers 4` — the data loaders are JPEG-decode-bound, so without workers the GPU starves
-and runtimes are ~4× longer.
+- **Screening:** V4 rendered (200k, ensemble) ≈ 20 min; V4/V1 ImageNet (1.28M, ensemble, 4 workers)
+  ≈ 1 h; full-field ImageNet (200k subset) ≈ 20–25 min.
+- **Synthesis:** ≈ 213 s/neuron (V4) / 141 s/neuron (V1) at 10 seeds → ≈ 12–17 h per twin. Detach long
+  runs (`setsid`) to survive disconnects.
+- **DreamSim:** ≈ 35–47 min per twin × dataset. **Similarity** (CPU) ≈ 2–4 min; **mask** ≈ 15–20 s.
 
-- **Screening (observed):** V4 rendered (200k, ensemble) ≈ **20 min**; V4 ImageNet (1.28M, ensemble,
-  4 workers) ≈ **1 h 9 min**; V1 ImageNet ≈ **1 h**; V4 ImageNet member-0 ≈ **1 h 9 min**.
-- **Synthesis (observed rates):** V4 ≈ 213 s/neuron, V1 ≈ 141 s/neuron at 10 seeds → ≈ **12–13 h**
-  (V4, 205 neurons) / ≈ **17 h** (V1, 445). Long runs are detached (`setsid`) to survive disconnects.
-- **DreamSim (observed):** rendered (200k, ensemble) ≈ **35–40 min** per area; ImageNet subset
-  (~205k V4 / ~209k V1) ≈ **45–47 min** per area. **Similarity** (`similarity.py`) is CPU-only,
-  ≈ **2–4 min** per model × dataset; **mask** (`synthesis/mask.py`) ≈ **15–20 s** per area.
-
-**Concurrency — and a memory caveat we hit.** Two ImageNet screenings at once **OOM-killed** the
-cgroup: each streams ~140 GB of JPEGs into page cache, pushing past 100 GiB. So ImageNet runs are
-paced. The DreamSim rendered passes, by contrast, we ran **two areas concurrently** safely — but
-only after checking `memory.stat`: `memory.current` sits near 100 GiB because of **cold
-`inactive_file` cache** (~85 GiB), while real (anon) usage is only ~7 GiB. Judge headroom by the
-anon / inactive-file split in `memory.stat`, not the headline `memory.current`.
+**Concurrency caveat:** two ImageNet screenings at once can OOM the cgroup (each streams ~140 GB of JPEGs
+into page cache). Pace ImageNet runs; judge headroom by the anon / inactive-file split in `memory.stat`,
+not the headline `memory.current`.
 
 ### Status
 
-- **Done (model backbone):** twins + inclusion; `sparse_split` (V4 160 non-sparse / 45 sparse;
-  V1 312 / 133); screening (ensemble V4+V1 rendered+ImageNet, V4 member-0 ImageNet); synthesis
-  (V4+V1 MEIs/LEIs); RF masks reproduced from the MEIs/LEIs (`synthesis/mask.py`, corr 0.996 V4 /
-  0.992 V1); DreamSim embeddings (V4+V1, rendered+ImageNet); similarity → **Fig 6** d-prime + **Fig 9**
-  2D space (centered embeddings, ddof-1 d-prime, 15-image poles, degree-1 controls; CV-validated
-  linear, V4 non-sparse R² ≈ 0.28 rendered vs Franke's 0.23); **Figs 4-5** DEI strips
-  (`neuron_strips`, `make_fig_mei_lei`).
-- **Done (recorded backbone, V4):** `data/recordings.py` (SESSION_ORDER aligns to `correlations.npy`,
-  r = 0.998); **Fig 1c** accuracy (recomputed corr-to-avg matches `correlations.npy` at r = 0.9997,
-  n>0.4 = 207); **Fig 2** model-vs-recorded skewness (r = 0.68, matching the paper's 0.66); **Fig 7**
-  recorded-response verification (non-sparse capture both extremes; sparse only the excitatory end);
-  **Fig 10** population (MAI right-skewed, LAI bimodal, random uniform; + cross-animal); **Suppl. Fig 4**
-  simulated simple (bimodal) vs complex (sparse) cells.
-- **To follow:** Fig 2e,f baseline firing (awaiting the gray-screen fixation window), Fig 8 independent
-  evaluator, Fig 11 mouse, and the V1 recorded panels (no V1 recordings in this release).
+- **Model track (v4/resnet, v1/convnext):** synthesis + masks (reproduce the shipped masks, corr 0.996
+  V4 / 0.992 V1), screening (rendered + ImageNet), DreamSim, similarity → **Fig 6** d′ + **Fig 9** 2D
+  space, **Figs 4-5** strips. `sparse_split`: V4 160/45, V1 312/133.
+- **Recorded track (V4):** **Fig 1c** (recomputed corr-to-avg matches `correlations.npy`, r = 0.9997,
+  n > 0.4 = 207), **Fig 2** (model-vs-recorded skewness r = 0.68), **Fig 7**, **Fig 10**, **Suppl. Fig 4**.
+- **DINO twins (v4/dino, v1/dino):** trained; their synthesis/screening ℓ2 constants in the registry are
+  provisional starting points (not yet re-derived for the 224px input).
+- **To follow:** V1 recorded panels need V1's canonical `SESSION_ORDER` (in `data/recordings.py`); Fig 2e,f
+  baseline firing; Fig 8 independent evaluator; Fig 11 mouse; a deliberate cross-twin comparison figure.
+
+## Package structure
+
+```
+dualneuron/
+├── utils.py                # env_dir, ensure_dir, RewriteLine (twin-aware helpers live in twins/registry)
+├── twins/
+│   ├── registry.py         # (area, backbone) registry: geometry, arch, paths, correlations/mask, neuron selection
+│   ├── nets.py             # loaders: V4ColorTaskDriven, V1GrayTaskDriven, V4ColorDino, V1GrayDino, load_model
+│   ├── dino.py             # DINOv3 model classes (frozen or truncated fine-tuned core + Gaussian readout)
+│   ├── activations.py      # activation-extraction utilities
+│   └── V4ColorTaskDriven/, V1GrayTaskDriven/, V4GrayTaskDriven/   # shipped weights + mask.npy + correlations.npy
+├── screening/run.py        # screen_activations (--field masked|full, --n_sample); sets.py, utils.py, visualize.py
+├── synthesis/              # ascend.py, generate.py, mask.py, ops.py, visualize.py, priors/
+├── dream/                  # sim.py, subset.py, similarity.py, axis.py  (DreamSim analyses)
+├── data/recordings.py      # load_sessions / build_response_matrix (per area; SESSION_ORDER aligns neurons)
+├── training/               # config.py, dataset.py, features.py, trainer.py, run.py, eval_ensemble.py, convert_dinov3_weights.py
+├── figures/                # make_fig_*.py, neuron_strips.py  (per-twin PDFs)
+├── migrate_analysis_layout.py   # one-time old-flat -> {area}/{backbone}/ migration
+└── analysis/pca.py
+```
 
 ## Data Availability
 
-The full dataset (25 GB) supporting our findings is available at:  
-[https://doi.org/10.5061/dryad.q573n5tx3](https://datadryad.org/dataset/doi:10.5061/dryad.q573n5tx3)
-
-This includes:
-- 200,000 synthetically rendered scenes (236×236 PNG)
-- MEIs and LEIs for all neurons (V1 and V4)
-- Sorted ImageNet indices (MAIs/LAIs)
-- Predicted activation profiles
-- Baseline firing rates and reliability metrics
-
-ImageNet itself is **not** included (license restrictions). See
-[Getting ImageNet](#getting-imagenet) to download it via Hugging Face.
+The full dataset (25 GB) is at [doi:10.5061/dryad.q573n5tx3](https://datadryad.org/dataset/doi:10.5061/dryad.q573n5tx3):
+200,000 rendered scenes, MEIs/LEIs (V1 & V4), sorted ImageNet indices, predicted activation profiles,
+baseline firing rates and reliability metrics. ImageNet itself is not included (license); see
+[Getting ImageNet](#getting-imagenet).
 
 ## Citation
-
-If you use this code, please cite our paper:
 
 ```bibtex
 @article{franke2025dual,

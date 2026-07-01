@@ -8,8 +8,8 @@ input (MEI). Each seed is its synthesized image blended with its alpha (the RF e
 optimization settled on) over a gray background via synthesis.visualize.blend -- the same
 recipe used in the Deis notebook.
 
-    python -m dualneuron.figures.make_fig_mei_lei              # both areas
-    python -m dualneuron.figures.make_fig_mei_lei --area v4
+    python -m dualneuron.figures.make_fig_mei_lei --area v4 --backbone resnet
+    python -m dualneuron.figures.make_fig_mei_lei --area v1 --backbone convnext
 """
 import os
 import argparse
@@ -21,13 +21,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from dotenv import load_dotenv
 
-from dualneuron.utils import ensure_dir, env_dir, sparse_split
+from dualneuron.utils import ensure_dir, env_dir
+from dualneuron.twins import registry
 from dualneuron.synthesis.visualize import blend
-from dualneuron.figures.neuron_strips import select_neurons, AREAS
+from dualneuron.figures.neuron_strips import select_neurons, ACCENT
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(REPO_ROOT / ".env")
-ANALYSIS_DIR = env_dir("ANALYSIS_DIR")
 FIGS = env_dir("PAPER_FIG_DIR", str(REPO_ROOT / "figs"))
 
 POLE = {"LEI": "#2f6db0", "MEI": "#c0392b"}   # least- / most-exciting accents
@@ -41,11 +41,11 @@ def _seed_image(image, alpha, channels):
     return b[..., 0] if channels == 1 else b
 
 
-def figure(area, neurons):
+def figure(area, backbone, neurons):
     """One figure for `neurons` (list of (id, skewness), ascending), saved as PDF."""
-    cfg = AREAS[area]
-    syn = os.path.join(ANALYSIS_DIR, area, "synthesis")
-    cmap = cfg["cmap"]
+    spec = registry.resolve(area, backbone)
+    cmap = "gray" if spec.channels == 1 else None
+    accent = ACCENT[area]
     imshow_kw = {} if cmap is None else dict(vmin=0, vmax=1)
 
     nb = len(neurons)
@@ -53,14 +53,14 @@ def figure(area, neurons):
     gs = fig.add_gridspec(nb, 1, hspace=0.5, left=0.11, right=0.95, top=0.99, bottom=0.06)
 
     for bi, (nid, sk) in enumerate(neurons):
-        z = np.load(os.path.join(syn, f"{area}_neuron{nid:04d}.npz"))
+        z = np.load(registry.synthesis_neuron_path(area, backbone, nid))
         rows = [("LEI", z["lei_image"], z["lei_alpha"]),
                 ("MEI", z["mei_image"], z["mei_alpha"])]
         inner = gs[bi].subgridspec(2, N_SEEDS, hspace=0.05, wspace=0.05)
         for r, (label, imgs, alphas) in enumerate(rows):
             for c in range(N_SEEDS):
                 ax = fig.add_subplot(inner[r, c])
-                ax.imshow(_seed_image(imgs[c], alphas[c], cfg["channels"]), cmap=cmap, **imshow_kw)
+                ax.imshow(_seed_image(imgs[c], alphas[c], spec.channels), cmap=cmap, **imshow_kw)
                 ax.set_xticks([])
                 ax.set_yticks([])
                 for spine in ax.spines.values():
@@ -70,31 +70,30 @@ def figure(area, neurons):
                                   color=POLE[label], fontsize=11, fontweight="bold")
         pos = gs[bi].get_position(fig)
         fig.text(0.05, 0.5 * (pos.y0 + pos.y1), f"n{nid}\nskew {sk:.2f}",
-                 ha="center", va="center", fontsize=10, color=cfg["accent"], fontweight="bold")
+                 ha="center", va="center", fontsize=10, color=accent, fontweight="bold")
 
     fig.text(0.5 * (0.11 + 0.95), 0.02, "synthesis seeds  1 → 10",
              ha="center", va="center", fontsize=10, color="0.3")
 
-    out = os.path.join(ensure_dir(FIGS), f"{area}_mei_lei_seeds.pdf")
+    out = os.path.join(ensure_dir(os.path.join(FIGS, area, backbone)), "mei_lei_seeds.pdf")
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
-    print(f"{area}: neurons {[n for n, _ in neurons]} -> {out}", flush=True)
+    print(f"{area}/{backbone}: neurons {[n for n, _ in neurons]} -> {out}", flush=True)
     return out
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Synthesized LEI/MEI seed strips per neuron")
-    parser.add_argument("--area", choices=["v4", "v1"], default=None, help="default: both")
+    parser.add_argument("--area", required=True, choices=registry.AREAS)
+    parser.add_argument("--backbone", required=True, choices=registry.BACKBONES)
     parser.add_argument("--neurons", type=int, nargs="+", default=None,
                         help="override the neuron set (still ordered by skewness)")
     args = parser.parse_args()
 
-    areas = [args.area] if args.area else ["v4", "v1"]
-    for area in areas:
-        if args.neurons:
-            sp = sparse_split(area)
-            skew = {int(n): float(s) for n, s in zip(sp["neurons"], sp["skewness"])}
-            neurons = sorted(((n, skew[n]) for n in args.neurons if n in skew), key=lambda t: t[1])
-        else:
-            neurons = select_neurons(area)
-        figure(area, neurons)
+    if args.neurons:
+        sp = registry.sparse_split(args.area, args.backbone)
+        skew = {int(n): float(s) for n, s in zip(sp["neurons"], sp["skewness"])}
+        neurons = sorted(((n, skew[n]) for n in args.neurons if n in skew), key=lambda t: t[1])
+    else:
+        neurons = select_neurons(args.area, args.backbone)
+    figure(args.area, args.backbone, neurons)

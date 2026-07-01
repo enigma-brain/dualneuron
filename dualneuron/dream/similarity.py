@@ -4,7 +4,8 @@ to its predicted activity (paper Figs 6 and 10).
 
 Both analyses operate on DreamSim embeddings (from dualneuron.dream.sim.embeddings)
 and the per-neuron ordered responses/indices produced by screening (the
-{area}_ensemble_{dataset}_ordered_{responses,indices}.npz files, keyed unit_{id}).
+ensemble_{dataset}_ordered_{responses,indices}.npz files under ANALYSIS_DIR/{area}/{backbone}/,
+keyed unit_{id}).
 
 Following Franke et al., every cosine similarity is computed on *globally centered*
 embeddings: the mean embedding over all images is subtracted first, then each vector
@@ -546,26 +547,27 @@ if __name__ == "__main__":
     from pathlib import Path
     from dotenv import load_dotenv
     load_dotenv()
-    from dualneuron.utils import (
-        env_dir, well_predicted_neurons, _AREA_MODELS, ensure_dir, RewriteLine,
-    )
+    from dualneuron.utils import env_dir, ensure_dir, RewriteLine
+    from dualneuron.twins import registry
 
     ANALYSIS_DIR = env_dir("ANALYSIS_DIR")
     LOGS_DIR = env_dir("LOGS_DIR")
     parser = argparse.ArgumentParser(description="DreamSim coherence (Fig 6) and 2D similarity space (Fig 10)")
-    parser.add_argument("--embeddings", type=str, default=None,
-                        help="npz with 'embeddings' and 'indices' (default ANALYSIS_DIR/{model}/{model}_dreamsim_{dataset}_embeddings.npz)")
-    parser.add_argument("--model", type=str, default="v4", help="v1 or v4")
+    parser.add_argument("--area", type=str, required=True, choices=registry.AREAS, help="v1 or v4")
+    parser.add_argument("--backbone", type=str, required=True, choices=registry.BACKBONES, help="twin backbone")
     parser.add_argument("--dataset", type=str, default="rendered", help="rendered or imagenet")
+    parser.add_argument("--embeddings", type=str, default=None,
+                        help="npz with 'embeddings' and 'indices' (default ANALYSIS_DIR/{area}/{backbone}/dreamsim_{dataset}_embeddings.npz)")
     parser.add_argument("--analysis_dir", type=str, default=None,
-                        help="dir with {model}_ensemble_{dataset}_ordered_{responses,indices}.npz (default ANALYSIS_DIR/{model})")
-    parser.add_argument("--output", type=str, default=None, help="npz to save the results")
+                        help="dir with ensemble_{dataset}_ordered_{responses,indices}.npz (default ANALYSIS_DIR/{area}/{backbone})")
+    parser.add_argument("--output", type=str, default=None,
+                        help="npz to save the results (default ANALYSIS_DIR/{area}/{backbone}/similarity_{dataset}.npz)")
     parser.add_argument("--k", type=int, default=10, help="MAIs/LAIs per pole for d-prime (Fig 6)")
     parser.add_argument("--n_poles", type=int, default=15, help="images per pole for the R^2 space (Fig 10)")
     parser.add_argument("--n_iterations", type=int, default=100, help="random draws averaged per control")
     parser.add_argument("--seed", type=int, default=0, help="RNG seed for random references")
     parser.add_argument("--log_path", type=str, default=None,
-                        help="progress log file (default LOGS_DIR/{model}_{dataset}_similarity.log)")
+                        help="progress log file (default LOGS_DIR/{area}_{backbone}_{dataset}_similarity.log)")
     parser.add_argument("--log_every", type=float, default=10.0,
                         help="min seconds between progress-line updates")
     args = parser.parse_args()
@@ -576,32 +578,30 @@ if __name__ == "__main__":
             "ANALYSIS_DIR=${DATA_DIR}/DUAL-FEATURE-ANALYSIS) or pass "
             "--analysis_dir and --embeddings explicitly."
         )
-    analysis_dir = args.analysis_dir or os.path.join(ANALYSIS_DIR, args.model)
-    emb_path = args.embeddings or os.path.join(
-        ANALYSIS_DIR, args.model, f"{args.model}_dreamsim_{args.dataset}_embeddings.npz"
-    )
+    analysis_dir = args.analysis_dir or registry.analysis_dir(args.area, args.backbone)
+    emb_path = args.embeddings or registry.dreamsim_embeddings_path(args.area, args.backbone, args.dataset)
     emb = np.load(emb_path)
     embeddings, indices = emb["embeddings"], emb["indices"]
-    ordered_responses = np.load(os.path.join(analysis_dir, f"{args.model}_ensemble_{args.dataset}_ordered_responses.npz"))
-    ordered_indices = np.load(os.path.join(analysis_dir, f"{args.model}_ensemble_{args.dataset}_ordered_indices.npz"))
+    ordered_responses = np.load(os.path.join(analysis_dir, f"ensemble_{args.dataset}_ordered_responses.npz"))
+    ordered_indices = np.load(os.path.join(analysis_dir, f"ensemble_{args.dataset}_ordered_indices.npz"))
 
     # Restrict to the well-predicted neurons (inclusion criterion, correlation > 0.4); the
     # ordered npz files hold every screened neuron, but only the well-predicted ones' extremes
     # were embedded for the imagenet subset.
-    neurons = [int(n) for n in well_predicted_neurons(_AREA_MODELS[args.model])]
+    neurons = [int(n) for n in registry.well_predicted_neurons(args.area, args.backbone)]
 
     # Progress log: one line rewritten in place, bracketed by a header and footer
     # (clean in any editor), mirroring the screening / synthesis runs.
     log_path = args.log_path
     if log_path is None and LOGS_DIR is not None:
-        log_path = os.path.join(LOGS_DIR, f"{args.model}_{args.dataset}_similarity.log")
+        log_path = os.path.join(LOGS_DIR, args.area, args.backbone, f"similarity_{args.dataset}.log")
     log_file = None
     progress = None
     if log_path is not None:
         ensure_dir(Path(log_path).parent)
         log_file = open(log_path, "w")
         log_file.write(
-            f"similarity area={args.model} dataset={args.dataset} neurons={len(neurons)} "
+            f"similarity area={args.area} backbone={args.backbone} dataset={args.dataset} neurons={len(neurons)} "
             f"k={args.k} n_poles={args.n_poles} iters={args.n_iterations} "
             f"(centered embeddings, ddof=1, degree-1 controls)\n"
         )
@@ -640,14 +640,15 @@ if __name__ == "__main__":
         log_file.write(f"done in {elapsed:.0f}s\n")
         log_file.flush()
 
-    if args.output is not None:
-        np.savez(args.output,
-                 **{f"coh_{key}": val for key, val in coh.items()},
-                 **{f"sp_{key}": val for key, val in sp.items()})
-        print(f"saved {args.output}")
-        if log_file is not None:
-            log_file.write(f"saved {args.output}\n")
-            log_file.flush()
+    output = args.output or registry.similarity_path(args.area, args.backbone, args.dataset)
+    ensure_dir(Path(output).parent)
+    np.savez(output,
+             **{f"coh_{key}": val for key, val in coh.items()},
+             **{f"sp_{key}": val for key, val in sp.items()})
+    print(f"saved {output}")
+    if log_file is not None:
+        log_file.write(f"saved {output}\n")
+        log_file.flush()
 
     if log_file is not None:
         log_file.close()
