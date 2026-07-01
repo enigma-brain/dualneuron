@@ -4,12 +4,14 @@ One figure per area (and dataset) showing four neurons spanning the sparsity ran
 Neurons: 4, 5, the most non-sparse (lowest skewness) and the most sparse (highest
 skewness) well-predicted neuron of the area, ordered top->bottom by ascending skewness.
 Each neuron is a 2-row block: the 10 least-activating images (LAI) and the 10 most-
-activating (MAI), ordered low->high activation, receptive-field masked at bg=0.5
-(screening geometry, no z-score / no L2 so the natural image shows). The response
-range of each row is annotated at its right edge.
+activating (MAI), ordered low->high activation. `--field masked` (default) shows the
+receptive-field-masked images at bg=0.5 (the MAI/LAI regime); `--field full` sources the
+full-field screening and shows the **unmasked** crop the neuron actually saw. Either way no
+z-score / no L2 is applied to the display, so the natural image shows; the response range of
+each row is annotated at its right edge.
 
-    python -m dualneuron.figures.neuron_strips --area v4 --backbone resnet   # both datasets
-    python -m dualneuron.figures.neuron_strips --area v1 --backbone convnext --dataset rendered
+    python -m dualneuron.figures.neuron_strips --area v4 --backbone resnet                    # masked, both datasets
+    python -m dualneuron.figures.neuron_strips --area v4 --backbone resnet --field full       # full-field (imagenet)
 """
 import os
 import argparse
@@ -39,12 +41,13 @@ ACCENT = {"v4": "#2c6fbb", "v1": "#e08a1e"}
 POLE_COLOR = {"LAI": "#2f6db0", "MAI": "#c0392b"}
 
 
-def _build_dataset(area, backbone, dataset):
+def _build_dataset(area, backbone, dataset, field="masked"):
     spec = registry.resolve(area, backbone)
-    mask = np.load(registry.mask_path(area, backbone))
+    masked = field == "masked"          # full-field strips show the unmasked image the neuron saw
+    mask = np.load(registry.mask_path(area, backbone)) if masked else None
     common = dict(
         use_center_crop=True, use_resize_output=True, use_grayscale=spec.channels == 1,
-        use_normalize=False, use_mask=True, use_crop_to_mask=False, use_norm=False,
+        use_normalize=False, use_mask=masked, use_crop_to_mask=False, use_norm=False,
         use_clip=False, mask=mask, num_channels=spec.channels,
         output_size=(spec.input_size, spec.input_size), crop_size=spec.crop_size, bg_value=0.5,
     )
@@ -74,14 +77,14 @@ def select_neurons(area, backbone):
     return sorted(kept, key=lambda t: t[1])
 
 
-def figure(area, backbone, dataset, neurons):
+def figure(area, backbone, dataset, neurons, field="masked"):
     """One figure for `neurons` (list of (id, skewness), ascending), saved as PDF."""
     spec = registry.resolve(area, backbone)
     cmap = "gray" if spec.channels == 1 else None
     accent = ACCENT[area]
-    ds = _build_dataset(area, backbone, dataset)
-    idx = np.load(registry.screening_path(area, backbone, "ensemble", dataset, "indices"))
-    resp = np.load(registry.screening_path(area, backbone, "ensemble", dataset, "responses"))
+    ds = _build_dataset(area, backbone, dataset, field)
+    idx = np.load(registry.screening_path(area, backbone, "ensemble", dataset, "indices", field=field))
+    resp = np.load(registry.screening_path(area, backbone, "ensemble", dataset, "responses", field=field))
     imshow_kw = {} if cmap is None else dict(vmin=0, vmax=1)
 
     nb = len(neurons)
@@ -115,10 +118,11 @@ def figure(area, backbone, dataset, neurons):
              ha="center", va="center", fontsize=10, color="0.3")
 
     out_dir = ensure_dir(os.path.join(FIGS, area, backbone))
-    path = os.path.join(out_dir, f"neuron_strips_{dataset}.pdf")
+    suffix = "" if field == "masked" else "_fullfield"
+    path = os.path.join(out_dir, f"neuron_strips_{dataset}{suffix}.pdf")
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
-    print(f"{area}/{backbone} {dataset}: neurons {[n for n, _ in neurons]} -> {path}", flush=True)
+    print(f"{area}/{backbone} {dataset} ({field}): neurons {[n for n, _ in neurons]} -> {path}", flush=True)
     return path
 
 
@@ -126,12 +130,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Per-twin neuron-strip figure across the sparsity range")
     parser.add_argument("--area", required=True, choices=registry.AREAS)
     parser.add_argument("--backbone", required=True, choices=registry.BACKBONES)
-    parser.add_argument("--dataset", choices=["rendered", "imagenet"], default=None, help="default: both")
+    parser.add_argument("--dataset", choices=["rendered", "imagenet"], default=None, help="default: both (imagenet only for --field full)")
+    parser.add_argument("--field", choices=["masked", "full"], default="masked",
+                        help="'masked' (RF-masked screening) or 'full' (full-field screening; shows the unmasked images)")
     parser.add_argument("--neurons", type=int, nargs="+", default=None,
                         help="override the neuron set (still ordered by skewness)")
     args = parser.parse_args()
 
-    datasets = [args.dataset] if args.dataset else ["rendered", "imagenet"]
+    # Neuron selection is by masked-screening skewness (same neurons across regimes -> comparable);
+    # full-field screening currently exists for imagenet only, so default to it there.
+    datasets = ([args.dataset] if args.dataset
+                else (["imagenet"] if args.field == "full" else ["rendered", "imagenet"]))
     if args.neurons:
         sp = registry.sparse_split(args.area, args.backbone)
         skew = {int(n): float(s) for n, s in zip(sp["neurons"], sp["skewness"])}
@@ -139,4 +148,4 @@ if __name__ == "__main__":
     else:
         neurons = select_neurons(args.area, args.backbone)
     for dataset in datasets:
-        figure(args.area, args.backbone, dataset, neurons)
+        figure(args.area, args.backbone, dataset, neurons, field=args.field)
