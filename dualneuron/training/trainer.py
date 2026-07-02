@@ -18,7 +18,6 @@ ReduceLROnPlateau with early stop after ``lr_decay_steps`` reductions — the es
 """
 
 import os
-import shutil
 from pathlib import Path
 
 import numpy as np
@@ -27,16 +26,12 @@ import torch.nn.functional as F
 from dotenv import load_dotenv
 from tqdm import tqdm
 
-import dualneuron
 from dualneuron.utils import ensure_dir, env_dir
 from dualneuron.data.recordings import load_sessions, build_response_matrix
 from dualneuron.training.dataset import split_train_val
 from dualneuron.training.features import extract_features, cache_images, load_features
 
 load_dotenv()
-
-# Staged twin folder per area, used to copy the shared RF mask into a trained-model folder.
-_AREA_TWIN_FOLDER = {"v4": "V4ColorTaskDriven", "v1": "V1GrayTaskDriven"}
 
 
 # ---------------------------------------------------------------------------
@@ -390,18 +385,6 @@ def _train_one(config, seed, train_feat, train_resp, train_idx, val_idx,
     return twin, best_val, corr_per_neuron(test_preds, test_resp), test_preds
 
 
-def _copy_mask(config, log):
-    """Copy the area's shared RF mask into the trained-model folder (alongside the weights)."""
-    folder = _AREA_TWIN_FOLDER.get(config.area)
-    if folder is None:
-        return
-    src = os.path.join(os.path.dirname(dualneuron.__file__), "twins", folder, "mask.npy")
-    if os.path.isfile(src):
-        shutil.copyfile(src, os.path.join(config.trained_dir, "mask.npy"))
-    else:
-        log(f"  (no staged mask at {src}; skipping mask copy)")
-
-
 def _load_training_data(config, device):
     """Load sessions/responses and the cached trainable-part input (extract/cache once if needed).
 
@@ -427,12 +410,16 @@ def _member_path(config, seed):
 
 
 def _save_ensemble_correlations(config, ens_preds, recorded_avg, log):
-    """Save the ensemble's per-neuron corr-to-average (the verified eval metric) + the shared mask."""
+    """Save the ensemble's per-neuron corr-to-average (the verified eval metric).
+
+    The RF mask is NOT written here: non-staged twins regenerate their own mask from their own
+    MEIs via ``dualneuron.synthesis.mask`` -> ANALYSIS_DIR/{area}/{backbone}/mask.npy (which is what
+    ``registry.mask_path`` reads); staged twins keep their read-only shipped mask.
+    """
     from dualneuron.training.eval_ensemble import correlation_to_average
     corr = correlation_to_average(ens_preds, recorded_avg)
     ensure_dir(config.trained_dir)
     np.save(os.path.join(config.trained_dir, "correlations.npy"), corr)
-    _copy_mask(config, log)
     log(f"ensemble {config.area}/{config.backbone}: corr-to-avg mean={np.nanmean(corr):.4f}  "
         f"median={np.nanmedian(corr):.4f}  n>0.4={int(np.nansum(corr > 0.4))}  -> {config.trained_dir}")
     return corr

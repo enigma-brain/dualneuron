@@ -105,6 +105,8 @@ class TrainConfig:
     kind: str = field(init=False)
     input_size: int = field(init=False)
     crop_size: int = field(init=False)
+    train_crop: int = field(init=False)              # training-transform center-crop (defaults to crop_size)
+    train_upsample: Optional[int] = field(init=False)  # optional pre-crop upsample side (V1: 420); None = off
     channels: int = field(init=False)
     fine_tune: bool = field(init=False)
     cache_kind: str = field(init=False)          # "features" (frozen) or "images" (fine-tuned)
@@ -132,6 +134,8 @@ class TrainConfig:
         self.img_mean, self.img_std = r.img_mean, r.img_std
         self.input_size = r.input_size
         self.crop_size = r.crop_size
+        self.train_crop = r.train_crop or r.crop_size   # training crop (registry); falls back to screening crop
+        self.train_upsample = r.train_upsample           # pre-crop upsample side (V1 only); None = off
         self.channels = r.channels
         self.kind = spec["kind"]
         self.fine_tune = spec["fine_tune"]

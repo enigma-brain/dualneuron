@@ -38,11 +38,30 @@ SESSION_ORDER = {
         3790179108293, 3790351107925, 3790611795132, 3790694306738, 3791212493372,
         3790952209225, 3791382890199, 3791300744340, 3791467334221, 3791556653552,
     ],
-    "v1": [],
+    "v1": [
+        3631896544452, 3632669014376, 3632932714885, 3633364677437, 3634055946316,
+        3634142311627, 3634658447291, 3634744023164, 3635178040531, 3635949043110,
+        3636034866307, 3636552742293, 3637161140869, 3637248451650, 3637333931598,
+        3637760318484, 3637851724731, 3638367026975, 3638456653849, 3638885582960,
+        3638373332053, 3638541006102, 3638802601378, 3638973674012, 3639060843972,
+        3639406161189, 3640011636703, 3639664527524, 3639492658943, 3639749909659,
+        3640095265572, 3631807112901,
+    ],
 }
 
-# First two of the 12 time-bins precede the response (~80 ms latency) and are dropped.
-SKIP_BINS = 2
+# Time-bins dropped before summing spike counts over the 12-bin window, per area: V4 drops the first
+# two (~80 ms response latency); V1 sums all 12.
+SKIP_BINS = {"v4": 2, "v1": 0}
+
+
+def _session_area(sessions: List[dict]) -> str:
+    """Infer the area of loaded sessions by matching their ids against SESSION_ORDER (each area's
+    canonical session list). Sessions always come from load_sessions(area), so this is unambiguous."""
+    ids = {int(s["session_id"]) for s in sessions}
+    for area, order in SESSION_ORDER.items():
+        if ids & set(order):
+            return area
+    return "v4"
 
 
 def trials_dir(area: str = "v4", path: str = None) -> str:
@@ -130,9 +149,10 @@ def build_response_matrix(
     id_to_row = {int(img_id): i for i, img_id in enumerate(image_ids)}
     responses = np.full((len(image_ids), len(neuron_meta)), np.nan, dtype=np.float32)
 
+    skip = SKIP_BINS[_session_area(sessions)]
     global_idx = 0
     for sess in sessions:
-        spike_counts = sess[resp_key][:, SKIP_BINS:, :].sum(axis=1).astype(np.float32)  # (units, trials)
+        spike_counts = sess[resp_key][:, skip:, :].sum(axis=1).astype(np.float32)  # (units, trials)
         sess_ids = sess[id_key]
         n_units = spike_counts.shape[0]
         if split == "test":

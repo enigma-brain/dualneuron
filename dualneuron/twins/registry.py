@@ -52,6 +52,11 @@ class TwinSpec:
     synth_target_norm: float
     synth_values_range: Tuple[float, float]
     staged_folder: Optional[str]
+    # Training-transform geometry (how the RECORDED stimuli are fed to the twin): optional pre-crop
+    # upsample, then a center-crop, then resize to input_size. Distinct from crop_size, which is the
+    # SCREENING RF crop -- screening never reads these. Defaults reproduce the plain V4 crop.
+    train_crop: Optional[int] = None       # center-crop side for training (None -> use crop_size)
+    train_upsample: Optional[int] = None   # pre-crop upsample side (V1 stimulus: 420); None -> off
 
 
 # The twin catalog: the four (area, backbone) twins of the dual-model paper.
@@ -67,9 +72,11 @@ TWINS = {
     ("v4", "dino"):     TwinSpec("v4", "dino", "v4_dino", 224, 200, 3, 113.5, 59.58, 394,
                                  40.0, "fourier", 40.0, (-1.9, 2.3), None),
     ("v1", "convnext"): TwinSpec("v1", "convnext", "v1", 93, 167, 1, 124.54466, 70.28, 458,
-                                 12.0, "pixel", 12.0, (-1.77, 1.86), "V1GrayTaskDriven"),
+                                 12.0, "pixel", 12.0, (-1.77, 1.86), None,
+                                 train_crop=280, train_upsample=420),
     ("v1", "dino"):     TwinSpec("v1", "dino", "v1_dino", 224, 167, 1, 124.54466, 70.28, 458,
-                                 12.0, "pixel", 12.0, (-1.77, 1.86), None),
+                                 12.0, "pixel", 12.0, (-1.77, 1.86), None,
+                                 train_crop=280, train_upsample=420),
 }
 
 AREAS = list(dict.fromkeys(a for a, _ in TWINS))
@@ -166,6 +173,19 @@ def correlations_path(area: str, backbone: str, weights_dir: Optional[str] = Non
         return os.path.join(_TWINS_DIR, spec.staged_folder, "correlations.npy")
     tm = env_dir("TRAINED_MODELS_DIR")
     return os.path.join(tm, area, backbone, "correlations.npy") if tm else None
+
+
+def weights_dir(area: str, backbone: str) -> Optional[str]:
+    """Default ensemble-weights dir for a twin, keyed off ``staged_folder`` (single switch, matching
+    :func:`correlations_path`/:func:`mask_path`): ``None`` for a shipped/staged twin -- ``load_model``
+    then reads the read-only ``twins/<folder>`` weights -- else ``TRAINED_MODELS_DIR/{area}/{backbone}``
+    (the trained ensemble). Downstream loaders resolve their ``weights_dir`` through this so a user just
+    picks ``(area, backbone)`` and gets matching weights + correlations + mask; pass one to override."""
+    spec = resolve(area, backbone)
+    if spec.staged_folder is not None:
+        return None
+    tm = env_dir("TRAINED_MODELS_DIR")
+    return os.path.join(tm, area, backbone) if tm else None
 
 
 def mask_path(area: str, backbone: str) -> str:

@@ -141,6 +141,9 @@ def generate(area, backbone, output_dir=None, num_seeds=10, neurons=None,
     if mode not in registry.SYNTHESIS_VARIANTS:
         raise ValueError(f"unknown mode {mode!r}; expected one of {registry.SYNTHESIS_VARIANTS}")
     spec = registry.resolve(area, backbone)
+    # Resolve where this twin's ensemble lives (staged read-only folder vs trained dir), keyed off the
+    # registry so weights, correlations and mask all come from the same place. Explicit arg overrides.
+    weights_dir = weights_dir or registry.weights_dir(area, backbone)
 
     if neurons is None:
         neurons = registry.well_predicted_neurons(area, backbone, weights_dir=weights_dir)

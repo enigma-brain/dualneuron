@@ -151,6 +151,7 @@ def screen_activations(
     assert dataset in ['rendered', 'imagenet']
 
     spec = registry.resolve(area, backbone)
+    weights_dir = weights_dir or registry.weights_dir(area, backbone)   # staged read-only vs trained dir
     tag = _run_tag(ensemble, member)
 
     function = load_model(

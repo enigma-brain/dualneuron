@@ -23,6 +23,7 @@ import torchvision.transforms as T
 
 # Re-exported for convenience so callers can pull everything data-related from one module.
 from dualneuron.data.recordings import load_sessions, build_response_matrix  # noqa: F401
+from dualneuron.twins import registry
 
 
 def split_train_val(
@@ -49,27 +50,46 @@ def split_train_val(
 
 def make_image_transform(input_size: int = 224, img_mean: float = 113.5,
                          img_std: float = 59.58, crop_size: int = 200,
-                         channels: int = 3) -> T.Compose:
-    """Image transform matching the released twin's eval preprocessing.
+                         channels: int = 3, upsample_size: int = None) -> T.Compose:
+    """Image transform matching the twin's training preprocessing.
 
-    Center-crop the RF region, bicubic-resize to the backbone's square input, to tensor, then the
-    single-valued (all-channel) z-score ``(pixel - mean) / std``. ``ToTensor`` rescales 0-255 -> 0-1,
-    so the stats are divided by 255 to act on the 0-1 tensor.
+    Optionally upsample the frame first, then center-crop, bicubic-resize to the backbone's square
+    input, to tensor, then the single-valued (all-channel) z-score ``(pixel - mean) / std``.
+    ``ToTensor`` rescales 0-255 -> 0-1, so the stats are divided by 255 to act on the 0-1 tensor.
 
     Args:
         input_size: Square model input side (224 DINOv3, 100 V4 ResNet, 93 V1 ConvNeXt).
         img_mean: Pixel mean (single value applied to all channels).
         img_std: Pixel std (single value applied to all channels).
-        crop_size: Center-crop side (200 for V4's 236x420 frame, 167 for V1's 233x233 frame).
+        crop_size: Center-crop side (200 for V4's 236x420 frame; 280 for V1 after the 420 upsample).
         channels: 1 (grayscale V1) or 3 (color V4); sets the normalize vector length.
+        upsample_size: If set, bicubic-resize the frame to this square side BEFORE the center-crop
+            (V1's 233 -> 420 -> crop 280 -> 93 stimulus pipeline). None -> no pre-crop upsample (V4).
     """
-    return T.Compose([
+    steps = []
+    if upsample_size is not None:
+        steps.append(T.Resize((upsample_size, upsample_size),
+                              interpolation=T.InterpolationMode.BICUBIC, antialias=True))
+    steps += [
         T.CenterCrop(crop_size),
         T.Resize((input_size, input_size),
                  interpolation=T.InterpolationMode.BICUBIC, antialias=True),
         T.ToTensor(),
         T.Normalize(mean=[img_mean / 255] * channels, std=[img_std / 255] * channels),
-    ])
+    ]
+    return T.Compose(steps)
+
+
+def training_transform(area: str, backbone: str) -> T.Compose:
+    """The twin's training-time image transform, built from the registry geometry: optional stimulus
+    upsample -> center-crop -> resize to the twin's input -> z-score. Shared by feature/image caching
+    (training) and the accuracy figure (which evaluates the twin on the recorded stimuli), so the two
+    cannot diverge. Screening uses its own RF crop (``spec.crop_size``), NOT this transform.
+    """
+    spec = registry.resolve(area, backbone)
+    crop = spec.train_crop or spec.crop_size
+    return make_image_transform(spec.input_size, spec.img_mean, spec.img_std, crop,
+                                spec.channels, upsample_size=spec.train_upsample)
 
 
 class ImageResponseDataset(Dataset):

@@ -3,8 +3,8 @@
 one ``(area, backbone)`` twin.
 
 Predictions are the twin ensemble's responses (learned readout positions, ``centered=False``) to the
-recorded test images, evaluated with the twin's training transform (``make_image_transform`` from the
-registry geometry: crop -> resize -> z-score); the RF mask and L2 norm are screening-only and are NOT
+recorded test images, evaluated with the twin's exact training transform (``training_transform``:
+optional stimulus upsample -> crop -> resize -> z-score); the RF mask and L2 norm are screening-only and are NOT
 applied here. Recorded responses come from ``dualneuron.data.recordings`` (spike counts summed over
 time-bins 2:, averaged over repeats for the correlation-to-average; single trials for the single-trial
 correlation). The two metrics match nnvision's ``get_avg_correlations`` / ``get_correlations``. The
@@ -30,7 +30,7 @@ from dotenv import load_dotenv
 from dualneuron.utils import env_dir, ensure_dir
 from dualneuron.twins import registry
 from dualneuron.twins.nets import load_model
-from dualneuron.training.dataset import make_image_transform
+from dualneuron.training.dataset import training_transform
 from dualneuron.data.recordings import load_sessions, build_response_matrix, SKIP_BINS
 from dualneuron.figures.neuron_strips import ACCENT
 
@@ -61,9 +61,9 @@ def _predict(area, backbone, image_ids, device, weights_dir=None, batch_size=64)
     The eval transform is the twin's training transform (crop -> resize -> z-score) from the registry.
     """
     spec = registry.resolve(area, backbone)
+    weights_dir = weights_dir or registry.weights_dir(area, backbone)   # staged read-only vs trained dir
     images_dir = os.path.join(env_dir("EXPERIMENT_DIR"), area, "images")
-    tf = make_image_transform(spec.input_size, spec.img_mean, spec.img_std,
-                              spec.crop_size, spec.channels)
+    tf = training_transform(area, backbone)          # exact training transform (never diverges from training)
     mode = "RGB" if spec.channels == 3 else "L"
     model = load_model(architecture=spec.arch, ensemble=True, centered=False,
                        weights_dir=weights_dir, device=device).eval()

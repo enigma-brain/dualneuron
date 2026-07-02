@@ -27,7 +27,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from dualneuron.utils import ensure_dir, RewriteLine
-from dualneuron.training.dataset import ImageResponseDataset, make_image_transform
+from dualneuron.training.dataset import ImageResponseDataset, training_transform
 
 
 def feature_tag(config) -> str:
@@ -114,8 +114,7 @@ def extract_features(config, image_ids, split, batch_size=None, device=None, log
         progress_file = RewriteLine(log_file, log_file.tell())
 
     extract = _build_extractor(config, device)
-    transform = make_image_transform(config.input_size, config.img_mean, config.img_std,
-                                     config.crop_size, config.channels)
+    transform = training_transform(config.area, config.backbone)
     dummy = np.zeros((len(image_ids), 1), dtype=np.float32)
     loader = DataLoader(
         ImageResponseDataset(image_ids, dummy, config.image_dir, transform, channels=config.channels),
@@ -185,8 +184,7 @@ def cache_images(config, image_ids, split, batch_size=None, log_path=None) -> st
                        f"{len(image_ids)} images -> {out_path}\n")
         progress_file = RewriteLine(log_file, log_file.tell())
 
-    transform = make_image_transform(config.input_size, config.img_mean, config.img_std,
-                                     config.crop_size, config.channels)
+    transform = training_transform(config.area, config.backbone)
     dummy = np.zeros((len(image_ids), 1), dtype=np.float32)
     loader = DataLoader(
         ImageResponseDataset(image_ids, dummy, config.image_dir, transform, channels=config.channels),
