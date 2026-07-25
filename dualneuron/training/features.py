@@ -26,20 +26,24 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from dualneuron.utils import ensure_dir, RewriteLine
+from dualneuron.utils import ensure_dir, RewriteLine, should_compute
 from dualneuron.training.dataset import ImageResponseDataset, training_transform
 
 
-def feature_tag(config) -> str:
-    """Short descriptor of the extraction point, used in the cache filename."""
-    if config.backbone == "dino":
-        return f"block{config.block:02d}"
-    return config.layer_name        # e.g. "layer3.0"
+def _single_thread_worker(worker_id):
+    """DataLoader worker init: cap each extraction worker to one CPU thread, so N parallel workers
+    (reading + transforming stimuli off CIFS) don't oversubscribe the host's cores."""
+    torch.set_num_threads(1)
 
 
-def feature_path(config, split: str) -> str:
-    """Cache file path for a split: ``FEATURES_DIR/{area}/{backbone}/{split}_features_<tag>.npy``."""
-    return os.path.join(config.features_dir, f"{split}_features_{feature_tag(config)}.npy")
+def input_cache_path(config, split: str) -> str:
+    """Cache path for a split's trainable-part input: ``FEATURES_DIR/{area}/{backbone}/{split}_inputs.npy``.
+
+    One constant name for both regimes -- frozen-core feature maps (``cache_kind="features"``) or
+    transformed input images (``cache_kind="images"``). The ``{area}/{backbone}/`` folder is the
+    disambiguator, so the filename carries no backbone/block/input-size tag.
+    """
+    return os.path.join(config.features_dir, f"{split}_inputs.npy")
 
 
 def _build_extractor(config, device):
@@ -76,7 +80,7 @@ def _build_extractor(config, device):
 
 
 @torch.no_grad()
-def extract_features(config, image_ids, split, batch_size=None, device=None, log_path=None) -> str:
+def extract_features(config, image_ids, split, batch_size=None, device=None, log_path=None, rewrite=False) -> str:
     """Extract and cache the frozen-core feature maps for ``image_ids``.
 
     Idempotent: returns immediately if the cache file already exists. The feature-map shape
@@ -94,8 +98,8 @@ def extract_features(config, image_ids, split, batch_size=None, device=None, log
     Returns:
         str: Path to the ``.npy`` cache file.
     """
-    out_path = feature_path(config, split)
-    if os.path.exists(out_path):
+    out_path = input_cache_path(config, split)
+    if not should_compute(out_path, rewrite):
         print(f"  cached: {out_path}", flush=True)
         return out_path
 
@@ -118,7 +122,8 @@ def extract_features(config, image_ids, split, batch_size=None, device=None, log
     dummy = np.zeros((len(image_ids), 1), dtype=np.float32)
     loader = DataLoader(
         ImageResponseDataset(image_ids, dummy, config.image_dir, transform, channels=config.channels),
-        batch_size=bs, shuffle=False, num_workers=config.num_workers, pin_memory=True,
+        batch_size=bs, shuffle=False, num_workers=config.extract_num_workers, pin_memory=True,
+        worker_init_fn=_single_thread_worker,
     )
 
     tmp_path = out_path + ".tmp"
@@ -147,27 +152,21 @@ def extract_features(config, image_ids, split, batch_size=None, device=None, log
     return out_path
 
 
-def image_cache_path(config, split: str) -> str:
-    """Cache file for transformed input images (fine-tuned path):
-    ``FEATURES_DIR/{area}/{backbone}/{split}_images_<inputsize>.npy``."""
-    return os.path.join(config.features_dir, f"{split}_images_{config.input_size:03d}.npy")
-
-
 @torch.no_grad()
-def cache_images(config, image_ids, split, batch_size=None, log_path=None) -> str:
+def cache_images(config, image_ids, split, batch_size=None, log_path=None, rewrite=False) -> str:
     """Transform and cache the input images for the fine-tuned (end-to-end) training path.
 
     For a fine-tuned backbone the frozen-feature cache is invalid (the backbone changes every step),
     so we cache the fixed *transformed input images* once — the input to the trainable part — then
     train the whole (truncated) backbone + head on them. Written as a float16 memmap to
-    ``FEATURES_DIR/{area}/{backbone}/{split}_images_<inputsize>.npy`` and reused across ensemble
-    members. Idempotent (returns immediately if the cache already exists).
+    ``FEATURES_DIR/{area}/{backbone}/{split}_inputs.npy`` and reused across ensemble members.
+    Idempotent (returns immediately if the cache already exists).
 
     Returns:
         str: Path to the ``.npy`` cache file.
     """
-    out_path = image_cache_path(config, split)
-    if os.path.exists(out_path):
+    out_path = input_cache_path(config, split)
+    if not should_compute(out_path, rewrite):
         print(f"  cached: {out_path}", flush=True)
         return out_path
 
@@ -188,7 +187,8 @@ def cache_images(config, image_ids, split, batch_size=None, log_path=None) -> st
     dummy = np.zeros((len(image_ids), 1), dtype=np.float32)
     loader = DataLoader(
         ImageResponseDataset(image_ids, dummy, config.image_dir, transform, channels=config.channels),
-        batch_size=bs, shuffle=False, num_workers=config.num_workers, pin_memory=False,
+        batch_size=bs, shuffle=False, num_workers=config.extract_num_workers, pin_memory=False,
+        worker_init_fn=_single_thread_worker,
     )
 
     tmp_path = out_path + ".tmp"
@@ -214,6 +214,39 @@ def cache_images(config, image_ids, split, batch_size=None, log_path=None) -> st
     return out_path
 
 
-def load_features(path: str) -> np.ndarray:
-    """Load a cached feature/image file fully into RAM (float16)."""
-    return np.load(path)
+def _load_progress_bar(log, desc, total):
+    """One-line tqdm bar over ``total`` rows, rewritten into the seed log (a :class:`_Log`, via its
+    ``fh``) when given, else stderr -- so a multi-GB cache load reports progress instead of a silent gap."""
+    fh = getattr(log, "fh", None)
+    if fh is not None:
+        return tqdm(total=total, desc=desc, unit="img", file=RewriteLine(fh, fh.tell()),
+                    mininterval=1.0, ncols=100)
+    return tqdm(total=total, desc=desc, unit="img", mininterval=1.0, ncols=100)
+
+
+def load_features(path: str, log=None, desc: str = "load features") -> np.ndarray:
+    """Load a cached feature/image .npy fully into RAM (float16), reporting load progress.
+
+    Equivalent to ``np.load(path)`` but reads the (multi-GB, CIFS-backed) array in sequential chunks
+    with a tqdm bar written to ``log`` (the member's seed log), so materializing it isn't a silent gap
+    before training. Plain chunked reads (no mmap) keep it safe on the network filesystem.
+    """
+    from numpy.lib import format as npfmt
+    with open(path, "rb") as f:
+        version = npfmt.read_magic(f)
+        npfmt._check_version(version)
+        shape, fortran_order, dtype = npfmt._read_array_header(f, version)
+        if fortran_order or not shape:
+            return np.load(path)                       # uncommon layout -> defer to numpy
+        out = np.empty(shape, dtype=dtype)
+        n, row_bytes = shape[0], out[0].nbytes
+        chunk = max(1, (256 * 1024 * 1024) // max(row_bytes, 1))       # ~256 MB reads
+        bar = _load_progress_bar(log, f"{desc} ({out.nbytes / 1e9:.1f} GB)", n)
+        try:
+            for start in range(0, n, chunk):
+                end = min(start + chunk, n)
+                f.readinto(memoryview(out[start:end]))
+                bar.update(end - start)
+        finally:
+            bar.close()
+    return out

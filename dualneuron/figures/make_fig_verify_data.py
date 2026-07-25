@@ -27,14 +27,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from dotenv import load_dotenv
 
-from dualneuron.utils import env_dir, ensure_dir
+from dualneuron.utils import ensure_dir
 from dualneuron.twins import registry
 from dualneuron.data.recordings import load_sessions, build_response_matrix
 from dualneuron.figures.make_fig_accuracy import _predict  # shared eval pipeline (centered=False)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(REPO_ROOT / ".env")
-FIGS = env_dir("PAPER_FIG_DIR", str(REPO_ROOT / "figs"))
 POLE = {"most": "#c0392b", "least": "#2f6db0"}   # predicted most- / least-activating
 
 
@@ -83,7 +82,8 @@ def main(area, backbone, weights_dir=None):
     ax[0].legend(frameon=False, fontsize=8)
     ax[1].set_xlabel("recorded response percentile")
     fig.tight_layout()
-    out = os.path.join(ensure_dir(os.path.join(FIGS, area, backbone)), "fig_verify_data.pdf")
+    out = registry.fig_path(area, backbone, "verify_data.pdf")
+    ensure_dir(os.path.dirname(out))
     fig.savefig(out, dpi=300)
     plt.close(fig)
     print(f"saved {out}", flush=True)
@@ -96,4 +96,5 @@ if __name__ == "__main__":
     p.add_argument("--backbone", required=True, choices=registry.BACKBONES)
     p.add_argument("--weights_dir", default=None)
     args = p.parse_args()
+    registry.check_pair(args.area, args.backbone, p)
     main(args.area, args.backbone, args.weights_dir)

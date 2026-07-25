@@ -31,13 +31,13 @@ from tqdm import tqdm
 
 import dualneuron
 from dualneuron.twins import registry
-from dualneuron.utils import env_dir, ensure_dir, RewriteLine
+from dualneuron.utils import env_dir, ensure_dir, RewriteLine, should_compute
 
 ANALYSIS_DIR = env_dir("ANALYSIS_DIR")
 TWINS_DIR = os.path.join(os.path.dirname(dualneuron.__file__), "twins")
 
 
-def average_alpha(area, backbone, synthesis_dir=None, progress=None, mininterval=10.0):
+def average_alpha(area, backbone, variant="axis", synthesis_dir=None, progress=None, mininterval=10.0):
     """
     Mean synthesis alpha over every MEI and LEI of a twin (channels averaged).
 
@@ -56,12 +56,12 @@ def average_alpha(area, backbone, synthesis_dir=None, progress=None, mininterval
         FileNotFoundError: If no synthesis npz are present.
     """
     if synthesis_dir is None:
-        synthesis_dir = registry.synthesis_dir(area, backbone)
+        synthesis_dir = registry.synthesis_output_dir(area, backbone, variant)
     files = sorted(glob.glob(os.path.join(synthesis_dir, "neuron*.npz")))
     if not files:
         raise FileNotFoundError(
             f"No synthesis npz in {synthesis_dir}. Run the synthesis first: "
-            f"python -m dualneuron.synthesis.generate --area {area} --backbone {backbone}"
+            f"python -m dualneuron.synthesis.generate --area {area} --backbone {backbone} --mode {variant}"
         )
     iterator = files if progress is None else tqdm(
         files, file=progress, mininterval=mininterval, ncols=100, desc=f"avg alpha {area}")
@@ -76,7 +76,7 @@ def average_alpha(area, backbone, synthesis_dir=None, progress=None, mininterval
     return acc / n, len(files)
 
 
-def build_rf_mask(area, backbone, percentile=77.5, sigma=1.3, synthesis_dir=None,
+def build_rf_mask(area, backbone, variant="axis", percentile=77.5, sigma=1.3, synthesis_dir=None,
                   progress=None, mininterval=10.0):
     """
     Receptive-field mask: Gaussian-smoothed binary of the thresholded average alpha.
@@ -97,7 +97,7 @@ def build_rf_mask(area, backbone, percentile=77.5, sigma=1.3, synthesis_dir=None
     Returns:
         (np.ndarray, int): the (H, W) float64 mask in [0, 1] and the number of neurons used.
     """
-    alpha, n = average_alpha(area, backbone, synthesis_dir, progress, mininterval)
+    alpha, n = average_alpha(area, backbone, variant, synthesis_dir, progress, mininterval)
     binary = (alpha > np.percentile(alpha, percentile)).astype(np.float64)
     return gaussian_filter(binary, sigma), n
 
@@ -137,6 +137,10 @@ if __name__ == "__main__":
         description="Build an area's RF mask from its synthesized MEIs/LEIs")
     parser.add_argument("--area", type=str, required=True, choices=registry.AREAS)
     parser.add_argument("--backbone", type=str, required=True, choices=registry.BACKBONES)
+    parser.add_argument("--variant", default="axis", choices=registry.SYNTHESIS_VARIANTS,
+                        help="synthesis variant whose MEIs/LEIs build the mask, saved beside them "
+                             "(default: axis -- the better RF estimate)")
+    parser.add_argument("--rewrite", action="store_true", help="rebuild + overwrite even if the mask exists")
     parser.add_argument("--percentile", type=float, default=77.5,
                         help="threshold percentile of the average alpha (default: 77.5)")
     parser.add_argument("--sigma", type=float, default=1.3,
@@ -151,17 +155,22 @@ if __name__ == "__main__":
     parser.add_argument("--log_every", type=float, default=10.0,
                         help="min seconds between progress-line updates")
     args = parser.parse_args()
+    registry.check_pair(args.area, args.backbone, parser)
 
-    # Default to the non-staged regenerated location, and never write into the read-only staged tree.
-    output = args.output or registry.regenerated_mask_path(args.area, args.backbone)
+    # Default to the variant's mask.npy (beside its output/), and never write into the staged tree.
+    output = args.output or registry.regenerated_mask_path(args.area, args.backbone, args.variant)
     if os.path.abspath(output).startswith(os.path.abspath(TWINS_DIR) + os.sep):
         raise ValueError(
             f"Refusing to write into the read-only staged twins/ tree: {output}. "
-            f"Regenerated masks go to ANALYSIS_DIR/{{area}}/{{backbone}}/mask.npy.")
+            f"Regenerated masks go to ANALYSIS_DIR/{{area}}/{{backbone}}/synthesis/{{variant}}/mask.npy.")
+    if not should_compute(output, args.rewrite):
+        print(f"cached (use --rewrite to rebuild): {output}")
+        raise SystemExit(0)
     LOGS_DIR = env_dir("LOGS_DIR")
     log_path = args.log_path
     if log_path is None and LOGS_DIR is not None:
-        log_path = os.path.join(LOGS_DIR, args.area, args.backbone, "mask.log")
+        log_path = registry.log_path(args.area, args.backbone,
+                                     *registry.rel_synthesis(args.variant), "mask.log")
 
     log_file = None
     progress = None
@@ -176,7 +185,7 @@ if __name__ == "__main__":
 
     start = time.time()
     mask, n = build_rf_mask(
-        args.area, args.backbone, percentile=args.percentile, sigma=args.sigma,
+        args.area, args.backbone, variant=args.variant, percentile=args.percentile, sigma=args.sigma,
         synthesis_dir=args.synthesis_dir, progress=progress, mininterval=args.log_every,
     )
     elapsed = time.time() - start

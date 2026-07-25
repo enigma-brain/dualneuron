@@ -10,7 +10,7 @@ artifacts, ``correlations.npy`` and RF ``mask.npy`` live.
 ``TRAINED_MODELS_DIR/{area}/{backbone}/``.
 
 **Staged twins are read-only.** The shipped twins under ``dualneuron/twins/<folder>/``
-(``V4ColorTaskDriven``, ``V1GrayTaskDriven``, ``V4GrayTaskDriven``) — their weights,
+(``V4ColorTaskDriven``, ``V4ColorDataDriven``, ``V1GrayTaskDriven``, ``V4GrayTaskDriven``) — their weights,
 ``correlations.npy`` and ``mask.npy`` — are never modified. A newly trained twin's weights +
 ``correlations.npy`` live in ``TRAINED_MODELS_DIR/{area}/{backbone}/``, and its regenerated RF mask
 in ``ANALYSIS_DIR/{area}/{backbone}/mask.npy``.
@@ -59,24 +59,34 @@ class TwinSpec:
     train_upsample: Optional[int] = None   # pre-crop upsample side (V1 stimulus: 420); None -> off
 
 
-# The twin catalog: the four (area, backbone) twins of the dual-model paper.
-# Geometry (input_size/crop_size/channels/img_mean/img_std/n_neurons) and arch are verified — from
-# the staged twins (v4/resnet, v1/convnext) and from training (v4/dino, v1/dino). The screening /
-# synthesis L2 constants (screen_norm, synth_target_norm, synth_values_range) are the established,
-# validated values for the staged twins; for the DINO twins they are inherited from the area's staged
-# twin as provisional starting points — NOT yet re-derived for the 224px DINO input, so revisit them
-# when the DINO synthesis/screening is actually run.
+# The twin catalog. Per area we have our trained backbone twin (v4 resnet / v1 convnext), the shipped
+# read-only "staged" twin (V4ColorTaskDriven / V1GrayTaskDriven, the paper's original), and our trained
+# dino; v4 additionally has the shipped read-only data-driven ensemble (V4ColorDataDriven), which is the
+# data-driven counterpart of the staged task-driven twin on the same 394 neurons and the same geometry.
+# staged_folder != None marks the shipped read-only twins; the others train into
+# TRAINED_MODELS_DIR/{area}/{backbone}.
+# Geometry (input_size/crop_size/channels/img_mean/img_std/n_neurons) and arch are verified. The
+# screening / synthesis L2 constants (screen_norm, synth_target_norm, synth_values_range) are the
+# established staged-twin values; the DINO twins inherit them as provisional starting points — NOT yet
+# re-derived for the 224px DINO input, so revisit when the DINO synthesis/screening is actually run.
 TWINS = {
+    # v4: our trained resnet + the shipped staged twin (V4ColorTaskDriven, read-only) + our trained dino
     ("v4", "resnet"):   TwinSpec("v4", "resnet", "v4", 100, 200, 3, 113.5, 59.58, 394,
+                                 40.0, "fourier", 40.0, (-1.9, 2.3), None),
+    ("v4", "staged"):   TwinSpec("v4", "staged", "v4", 100, 200, 3, 113.5, 59.58, 394,
                                  40.0, "fourier", 40.0, (-1.9, 2.3), "V4ColorTaskDriven"),
     ("v4", "dino"):     TwinSpec("v4", "dino", "v4_dino", 224, 200, 3, 113.5, 59.58, 394,
                                  40.0, "fourier", 40.0, (-1.9, 2.3), None),
+    ("v4", "data_driven"): TwinSpec("v4", "data_driven", "v4_data_driven", 100, 200, 3, 113.5, 59.58,
+                                    394, 40.0, "fourier", 40.0, (-1.9, 2.3), "V4ColorDataDriven"),
+    # v1: our trained convnext + the shipped staged twin (V1GrayTaskDriven, read-only) + our trained
+    # dino. V1 stimulus transform = center-crop 93 (dino upsamples the 93 crop to its 224 input).
     ("v1", "convnext"): TwinSpec("v1", "convnext", "v1", 93, 167, 1, 124.54466, 70.28, 458,
-                                 12.0, "pixel", 12.0, (-1.77, 1.86), None,
-                                 train_crop=280, train_upsample=420),
+                                 12.0, "pixel", 12.0, (-1.77, 1.86), None, train_crop=93),
+    ("v1", "staged"):   TwinSpec("v1", "staged", "v1", 93, 167, 1, 124.54466, 70.28, 458,
+                                 12.0, "pixel", 12.0, (-1.77, 1.86), "V1GrayTaskDriven", train_crop=93),
     ("v1", "dino"):     TwinSpec("v1", "dino", "v1_dino", 224, 167, 1, 124.54466, 70.28, 458,
-                                 12.0, "pixel", 12.0, (-1.77, 1.86), None,
-                                 train_crop=280, train_upsample=420),
+                                 12.0, "pixel", 12.0, (-1.77, 1.86), None, train_crop=93),
 }
 
 AREAS = list(dict.fromkeys(a for a, _ in TWINS))
@@ -94,66 +104,121 @@ def resolve(area: str, backbone: str) -> TwinSpec:
 
 
 def backbones_for(area: str):
-    """The backbones available for an area (e.g. ``['resnet', 'dino']`` for v4)."""
+    """The backbones available for an area (e.g. ``['resnet', 'staged', 'dino']`` for v4)."""
     return [b for (a, b) in TWINS if a == area]
 
 
+def check_pair(area: str, backbone: str, parser=None):
+    """Validate that ``(area, backbone)`` is a real twin. With an argparse ``parser`` emit a clean
+    ``parser.error`` (``--backbone`` choices span all areas, so a per-area pair must be checked after
+    parsing); otherwise raise ``ValueError``."""
+    if (area, backbone) not in TWINS:
+        msg = f"{backbone!r} is not a backbone for area {area!r}; choose from {backbones_for(area)}"
+        if parser is not None:
+            parser.error(msg)
+        raise ValueError(msg)
+
+
 # ---------------------------------------------------------------------------
-#  Analysis-output paths — ANALYSIS_DIR/{area}/{backbone}/... (bare, folder-namespaced)
+#  Artifact paths — ONE tree, THREE roots. Every artifact lives at
+#  {ROOT}/{area}/{backbone}/<stage rel...>, ROOT = ANALYSIS_DIR (data) | LOGS_DIR
+#  (logs) | PAPER_FIG_DIR (figures). A stage's relative path is IDENTICAL under all
+#  three roots, so filenames stay constant and the FOLDER is the search axis.
+#  Dataset-scoped stages nest under {dataset}/; model-intrinsic stages (synthesis +
+#  its RF mask) sit at the twin root.
 # ---------------------------------------------------------------------------
 
-def analysis_dir(area: str, backbone: str) -> Optional[str]:
-    """``ANALYSIS_DIR/{area}/{backbone}`` (None if ANALYSIS_DIR is unset)."""
-    base = env_dir("ANALYSIS_DIR")
+_ROOTS = {"analysis": "ANALYSIS_DIR", "log": "LOGS_DIR", "fig": "PAPER_FIG_DIR"}
+
+SYNTHESIS_VARIANTS = ("free", "axis")   # free = plain activation ascent; axis = population-axis method
+
+
+def artifact_dir(kind: str, area: str, backbone: str) -> Optional[str]:
+    """``{ROOT}/{area}/{backbone}`` for ``kind`` in {"analysis","log","fig"} (None if the root unset)."""
+    base = env_dir(_ROOTS[kind])
     return os.path.join(base, area, backbone) if base else None
 
 
-def screening_path(area: str, backbone: str, run: str, dataset: str, kind: str,
-                   field: str = "masked") -> str:
-    """Screening cache: ``.../{run}_{dataset}[_fullfield]_ordered_{kind}.npz``.
-
-    ``run`` is ``"ensemble"`` or ``"member{i}"``; ``kind`` is ``"responses"`` or ``"indices"``.
-    ``field`` is ``"masked"`` (RF-masked + L2-normed screening) or ``"full"`` (full-field: no mask,
-    no L2 — the natural-image regime, e.g. for the population axis). ``masked`` keeps the original
-    name so existing files still resolve.
-    """
-    regime = "" if field == "masked" else "fullfield_"
-    return os.path.join(analysis_dir(area, backbone), f"{run}_{dataset}_{regime}ordered_{kind}.npz")
+def _art(kind, area, backbone, *rel):
+    d = artifact_dir(kind, area, backbone)
+    return os.path.join(d, *rel) if d else None
 
 
-def dreamsim_embeddings_path(area: str, backbone: str, dataset: str) -> str:
-    """DreamSim embeddings: ``.../dreamsim_{dataset}_embeddings.npz``."""
-    return os.path.join(analysis_dir(area, backbone), f"dreamsim_{dataset}_embeddings.npz")
+def analysis_dir(area: str, backbone: str) -> Optional[str]:
+    """``ANALYSIS_DIR/{area}/{backbone}`` (None if ANALYSIS_DIR is unset)."""
+    return artifact_dir("analysis", area, backbone)
 
 
-def dreamsim_indices_path(area: str, backbone: str) -> str:
-    """ImageNet DreamSim subset indices: ``.../dreamsim_imagenet_indices.npy``."""
-    return os.path.join(analysis_dir(area, backbone), "dreamsim_imagenet_indices.npy")
+# --- stage relative paths (shared by data / log / fig so the three mirror exactly) ---
+def rel_screening(dataset, field="masked"):
+    return (dataset, "screening", field)
 
 
-def similarity_path(area: str, backbone: str, dataset: str) -> str:
-    """Similarity results: ``.../similarity_{dataset}.npz``."""
-    return os.path.join(analysis_dir(area, backbone), f"similarity_{dataset}.npz")
+def rel_dreamsim(dataset):
+    return (dataset, "dreamsim")
 
 
-# Synthesis methods: "free" is the original free ascent (dir kept as plain ``synthesis`` so the
-# shipped MEIs/LEIs and everything downstream are untouched); "axis" is the population-axis
-# (folded) method, written alongside in ``synthesis_axis``.
-SYNTHESIS_VARIANTS = ("free", "axis")
-
-
-def synthesis_dir(area: str, backbone: str, variant: str = "free") -> str:
-    """MEI/LEI output dir: ``ANALYSIS_DIR/{area}/{backbone}/synthesis`` (free) or
-    ``.../synthesis_{variant}`` for another synthesis method."""
+def rel_synthesis(variant):
     if variant not in SYNTHESIS_VARIANTS:
         raise ValueError(f"unknown synthesis variant {variant!r}; expected one of {SYNTHESIS_VARIANTS}")
-    name = "synthesis" if variant == "free" else f"synthesis_{variant}"
-    return os.path.join(analysis_dir(area, backbone), name)
+    return ("synthesis", variant)
 
 
-def synthesis_neuron_path(area: str, backbone: str, neuron: int, variant: str = "free") -> str:
-    """One neuron's MEI/LEI npz: ``.../{synthesis dir}/neuron{id:04d}.npz``."""
-    return os.path.join(synthesis_dir(area, backbone, variant), f"neuron{int(neuron):04d}.npz")
+def log_path(area, backbone, *rel):
+    """LOGS_DIR mirror; ``rel`` = stage parts ending in the .log filename, e.g.
+    ``log_path(area, backbone, *rel_screening(dataset, field), "screening.log")``."""
+    return _art("log", area, backbone, *rel)
+
+
+def fig_path(area, backbone, *rel):
+    """PAPER_FIG_DIR mirror; ``rel`` = stage parts ending in the .pdf filename (or just the .pdf for a
+    model-level figure, e.g. ``fig_path(area, backbone, "accuracy.pdf")``)."""
+    return _art("fig", area, backbone, *rel)
+
+
+def screening_path(area, backbone, dataset, kind, field="masked", run="ensemble"):
+    """Screening cache ``.../{dataset}/screening/{field}/{kind}.npz``.
+
+    ``kind`` is ``"responses"`` or ``"indices"``; ``field`` is ``"masked"`` (RF-masked + L2-normed) or
+    ``"full"`` (full-field natural, no mask/L2). ``run="ensemble"`` (default) is unprefixed; a per-member
+    run nests under ``member{i}/``.
+    """
+    rel = rel_screening(dataset, field)
+    if run != "ensemble":
+        rel = rel + (run,)
+    return _art("analysis", area, backbone, *rel, f"{kind}.npz")
+
+
+def dreamsim_embeddings_path(area, backbone, dataset):
+    """DreamSim embeddings ``.../{dataset}/dreamsim/embeddings.npz``."""
+    return _art("analysis", area, backbone, *rel_dreamsim(dataset), "embeddings.npz")
+
+
+def dreamsim_indices_path(area, backbone, dataset="imagenet"):
+    """DreamSim subset indices ``.../{dataset}/dreamsim/indices.npy`` (imagenet by default)."""
+    return _art("analysis", area, backbone, *rel_dreamsim(dataset), "indices.npy")
+
+
+def similarity_path(area, backbone, dataset):
+    """Similarity results ``.../{dataset}/dreamsim/similarity.npz`` (Fig 6 / 9 / 10)."""
+    return _art("analysis", area, backbone, *rel_dreamsim(dataset), "similarity.npz")
+
+
+def synthesis_dir(area, backbone, variant="free"):
+    """Variant synthesis dir ``.../synthesis/{variant}`` (self-contained: holds output/ + mask.npy)."""
+    return _art("analysis", area, backbone, *rel_synthesis(variant))
+
+
+def synthesis_output_dir(area, backbone, variant="free"):
+    """Per-neuron MEI/LEI dir ``.../synthesis/{variant}/output``."""
+    d = synthesis_dir(area, backbone, variant)
+    return os.path.join(d, "output") if d else None
+
+
+def synthesis_neuron_path(area, backbone, neuron, variant="free"):
+    """One neuron's MEI/LEI npz ``.../synthesis/{variant}/output/neuron{id:04d}.npz``."""
+    d = synthesis_output_dir(area, backbone, variant)
+    return os.path.join(d, f"neuron{int(neuron):04d}.npz") if d else None
 
 
 # ---------------------------------------------------------------------------
@@ -188,19 +253,23 @@ def weights_dir(area: str, backbone: str) -> Optional[str]:
     return os.path.join(tm, area, backbone) if tm else None
 
 
-def mask_path(area: str, backbone: str) -> str:
-    """Authoritative RF mask to READ: a shipped twin's staged (read-only) ``mask.npy``, else the
-    regenerated ``ANALYSIS_DIR/{area}/{backbone}/mask.npy`` (written by :mod:`dualneuron.synthesis.mask`)."""
-    spec = resolve(area, backbone)
-    if spec.staged_folder is not None:
-        return os.path.join(_TWINS_DIR, spec.staged_folder, "mask.npy")
-    return regenerated_mask_path(area, backbone)
+def mask_path(area: str, backbone: str, variant: str = "axis") -> Optional[str]:
+    """Authoritative RF mask to READ: ``.../synthesis/{variant}/mask.npy`` (default the ``axis``
+    variant -- the better RF estimate), falling back to ``free`` if the axis mask is not present yet.
+    Screening / DreamSim / neuron-strips read this."""
+    p = regenerated_mask_path(area, backbone, variant)
+    if variant == "axis" and p is not None and not os.path.exists(p):
+        free = regenerated_mask_path(area, backbone, "free")
+        if free is not None and os.path.exists(free):
+            return free
+    return p
 
 
-def regenerated_mask_path(area: str, backbone: str) -> str:
-    """Where :mod:`dualneuron.synthesis.mask` WRITES the mask built from this twin's MEIs/LEIs —
-    always the non-staged ``ANALYSIS_DIR/{area}/{backbone}/mask.npy`` (staged masks are never overwritten)."""
-    return os.path.join(analysis_dir(area, backbone), "mask.npy")
+def regenerated_mask_path(area: str, backbone: str, variant: str = "axis") -> Optional[str]:
+    """Where :mod:`dualneuron.synthesis.mask` WRITES the RF mask built from a variant's MEIs/LEIs:
+    ``.../synthesis/{variant}/mask.npy`` (beside that variant's output/)."""
+    d = synthesis_dir(area, backbone, variant)
+    return os.path.join(d, "mask.npy") if d else None
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +303,7 @@ def sparse_split(area: str, backbone: str, threshold: float = 2.0,
     """
     neurons = well_predicted_neurons(area, backbone, weights_dir=weights_dir)
     if responses_path is None:
-        responses_path = screening_path(area, backbone, "ensemble", "imagenet", "responses")
+        responses_path = screening_path(area, backbone, "imagenet", "responses")
     if not os.path.exists(responses_path):
         raise FileNotFoundError(
             f"Screening responses not found: {responses_path}. Run the imagenet screening first: "

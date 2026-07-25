@@ -13,7 +13,7 @@ from dualneuron.screening.sets import ImagenetImages, RenderedImages
 from dualneuron.twins.nets import load_model
 from dualneuron.twins import registry
 from dualneuron.twins.activations import get_layer_info, get_spatial_activation
-from dualneuron.utils import ensure_dir, env_dir, RewriteLine
+from dualneuron.utils import ensure_dir, env_dir, RewriteLine, should_compute
 
 import numpy as np
 from tqdm import tqdm
@@ -58,6 +58,7 @@ def screen_activations(
     batch_size=32,
     num_workers=0,
     save_format="npz",
+    rewrite=False,
     device="cuda",
     log_path=None,
     log_every=30.0,
@@ -153,6 +154,14 @@ def screen_activations(
     spec = registry.resolve(area, backbone)
     weights_dir = weights_dir or registry.weights_dir(area, backbone)   # staged read-only vs trained dir
     tag = _run_tag(ensemble, member)
+
+    # --rewrite gate (npz): skip the whole screen if both outputs exist and we're not rewriting.
+    if output_dir is not None and save_format == "npz":
+        _rp = registry.screening_path(area, backbone, dataset, "responses", field=field, run=tag)
+        _ip = registry.screening_path(area, backbone, dataset, "indices", field=field, run=tag)
+        if not should_compute(_rp, rewrite) and not should_compute(_ip, rewrite):
+            print(f"cached (use --rewrite to recompute): {_rp} | {_ip}")
+            return
 
     function = load_model(
         architecture=spec.arch,
@@ -311,15 +320,12 @@ def screen_activations(
         _finish(" (returned, not saved)")
         return sresps, sidx
 
-    ensure_dir(output_dir)
-    regime = "" if masked else "fullfield_"   # full-field files carry the regime, masked keep the name
-
     if save_format == "npz":
-        # One npz per (responses | indices), keyed by unit_{neuron_id}, each value a per-neuron array
-        # sorted ascending. Bare, folder-namespaced under ANALYSIS_DIR/{area}/{backbone}/
-        # (e.g. ensemble_rendered_ordered_responses.npz, ensemble_imagenet_fullfield_ordered_*.npz).
-        resp_path = os.path.join(output_dir, f"{tag}_{dataset}_{regime}ordered_responses.npz")
-        idx_path = os.path.join(output_dir, f"{tag}_{dataset}_{regime}ordered_indices.npz")
+        # One npz per (responses | indices), keyed unit_{neuron_id}, each a per-neuron array sorted
+        # ascending. New tree: ANALYSIS_DIR/{area}/{backbone}/{dataset}/screening/{field}/{kind}.npz.
+        resp_path = registry.screening_path(area, backbone, dataset, "responses", field=field, run=tag)
+        idx_path = registry.screening_path(area, backbone, dataset, "indices", field=field, run=tag)
+        ensure_dir(os.path.dirname(resp_path))
         np.savez(resp_path, **{f"unit_{unit}": sresps[:, i] for i, unit in enumerate(neurons)})
         np.savez(idx_path, **{f"unit_{unit}": sidx[:, i] for i, unit in enumerate(neurons)})
         print(f"saved {resp_path}")
@@ -328,12 +334,11 @@ def screen_activations(
         return
 
     elif save_format == "npy":
-        # Per-neuron .npy files in two folders ({tag}_{layer}_{dataset}_ordered_*).
-        layer_name = layer if layer is not None else "output"
-        endrespdir = os.path.join(output_dir, f"{tag}_{layer_name}_{dataset}_{regime}ordered_responses")
-        idxdir = os.path.join(output_dir, f"{tag}_{layer_name}_{dataset}_{regime}ordered_indices")
-        ensure_dir(endrespdir)
-        ensure_dir(idxdir)
+        # Per-neuron .npy under responses/ and indices/ of the screening/{field}/ dir.
+        base = os.path.dirname(
+            registry.screening_path(area, backbone, dataset, "responses", field=field, run=tag))
+        endrespdir = ensure_dir(os.path.join(base, "responses"))
+        idxdir = ensure_dir(os.path.join(base, "indices"))
         for i, unit in tqdm(enumerate(neurons), total=len(neurons)):
             np.save(os.path.join(endrespdir, f"{str(unit)}.npy"), sresps[:, i])
             np.save(os.path.join(idxdir, f"{str(unit)}.npy"), sidx[:, i])
@@ -373,10 +378,12 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=64, help="batch size for dataloader")
     parser.add_argument("--num_workers", type=int, default=4, help="dataloader workers (>=4: the JPEG decode is the bottleneck, so 0 starves the GPU ~4x slower)")
     parser.add_argument("--save_format", type=str, default="npz", help="npz (Dryad format) or npy (per-neuron folders)")
+    parser.add_argument("--rewrite", action="store_true", help="recompute + overwrite even if outputs exist (default: reuse)")
     parser.add_argument("--device", type=str, default="cuda", help="device to run on")
     parser.add_argument("--log_path", type=str, default=None, help="Progress log file (default LOGS_DIR/{area}/{backbone}/screening_{tag}_{dataset}.log)")
     parser.add_argument("--log_every", type=float, default=30.0, help="Min seconds between progress-line updates")
     args = parser.parse_args()
+    registry.check_pair(args.area, args.backbone, parser)
 
     # Default output location: ANALYSIS_DIR/{area}/{backbone}, created on demand.
     output_dir = args.output_dir
@@ -398,14 +405,11 @@ if __name__ == "__main__":
                 "or pass --data_dir."
             )
 
-    # Default progress log under LOGS_DIR, created on demand.
+    # Default progress log — mirrors the analysis tree under LOGS_DIR, created on demand.
     log_path = args.log_path
-    if log_path is None:
-        logs_dir = os.getenv("LOGS_DIR")
-        if logs_dir is not None:
-            tag = _run_tag(args.ensemble, args.member)
-            log_path = os.path.join(logs_dir, args.area, args.backbone,
-                                    f"screening_{args.field}_{tag}_{args.dataset}.log")
+    if log_path is None and os.getenv("LOGS_DIR"):
+        log_path = registry.log_path(args.area, args.backbone,
+                                     *registry.rel_screening(args.dataset, args.field), "screening.log")
 
     screen_activations(
         area=args.area,
@@ -427,6 +431,7 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         save_format=args.save_format,
+        rewrite=args.rewrite,
         device=args.device,
         log_path=log_path,
         log_every=args.log_every,

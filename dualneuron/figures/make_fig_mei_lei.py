@@ -21,14 +21,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from dotenv import load_dotenv
 
-from dualneuron.utils import ensure_dir, env_dir
+from dualneuron.utils import ensure_dir
 from dualneuron.twins import registry
 from dualneuron.synthesis.visualize import blend
 from dualneuron.figures.neuron_strips import select_neurons, ACCENT
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(REPO_ROOT / ".env")
-FIGS = env_dir("PAPER_FIG_DIR", str(REPO_ROOT / "figs"))
 
 POLE = {"LEI": "#2f6db0", "MEI": "#c0392b"}   # least- / most-exciting accents
 N_SEEDS = 10
@@ -77,8 +76,8 @@ def figure(area, backbone, neurons, variant="free"):
     fig.text(0.5 * (0.11 + 0.95), 0.02, "synthesis seeds  1 → 10",
              ha="center", va="center", fontsize=10, color="0.3")
 
-    stem = "mei_lei_seeds" if variant == "free" else f"mei_lei_seeds_{variant}"
-    out = os.path.join(ensure_dir(os.path.join(FIGS, area, backbone)), f"{stem}.pdf")
+    out = registry.fig_path(area, backbone, *registry.rel_synthesis(variant), "mei_lei_seeds.pdf")
+    ensure_dir(os.path.dirname(out))
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     print(f"{area}/{backbone} ({variant}): neurons {[n for n, _ in neurons]} -> {out}", flush=True)
@@ -94,6 +93,7 @@ if __name__ == "__main__":
     parser.add_argument("--variant", default="free", choices=registry.SYNTHESIS_VARIANTS,
                         help="synthesis method to display: 'free' (default) or 'axis'")
     args = parser.parse_args()
+    registry.check_pair(args.area, args.backbone, parser)
 
     if args.neurons:
         sp = registry.sparse_split(args.area, args.backbone)

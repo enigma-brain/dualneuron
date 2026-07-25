@@ -50,8 +50,8 @@ def population_axis(area, backbone, neurons=None, k=20, dataset="imagenet",
             "mean":    (P,) per-support-neuron full-field response mean (to z-score at synthesis time),
             "std":     (P,) per-support-neuron full-field response std.
     """
-    resp = np.load(registry.screening_path(area, backbone, "ensemble", dataset, "responses", field=field))
-    idx = np.load(registry.screening_path(area, backbone, "ensemble", dataset, "indices", field=field))
+    resp = np.load(registry.screening_path(area, backbone, dataset, "responses", field=field))
+    idx = np.load(registry.screening_path(area, backbone, dataset, "indices", field=field))
 
     # The axis space = the well-predicted neurons (training correlation > 0.4), per twin.
     support = np.sort(registry.well_predicted_neurons(area, backbone, weights_dir=weights_dir))

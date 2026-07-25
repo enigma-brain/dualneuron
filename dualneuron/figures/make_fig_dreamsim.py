@@ -20,13 +20,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from dotenv import load_dotenv
 
-from dualneuron.utils import env_dir, ensure_dir
+from dualneuron.utils import ensure_dir
 from dualneuron.twins import registry
 from dualneuron.dream.similarity import similarity_space_neuron, coherence_pooled
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(REPO_ROOT / ".env")
-FIGS = env_dir("PAPER_FIG_DIR", str(REPO_ROOT / "figs"))
 
 AREA = {"v4": dict(color="#2c6fbb", label="V4"), "v1": dict(color="#e08a1e", label="V1")}
 POLE = {"mai": "#c0392b", "lai": "#2f6db0"}   # most- / least-activating accents
@@ -62,8 +61,8 @@ def _embeddings(area, backbone, dataset):
 
 
 def _ordered(area, backbone, dataset):
-    resp = np.load(registry.screening_path(area, backbone, "ensemble", dataset, "responses"))
-    idx = np.load(registry.screening_path(area, backbone, "ensemble", dataset, "indices"))
+    resp = np.load(registry.screening_path(area, backbone, dataset, "responses"))
+    idx = np.load(registry.screening_path(area, backbone, dataset, "indices"))
     return resp, idx
 
 
@@ -186,7 +185,8 @@ def fig_dprime(area, backbone, dataset):
     _panel(axc, "c")
 
     fig.tight_layout()
-    out = os.path.join(ensure_dir(os.path.join(FIGS, area, backbone)), f"dreamsim_dprime_{dataset}.pdf")
+    out = registry.fig_path(area, backbone, *registry.rel_dreamsim(dataset), "dprime.pdf")
+    ensure_dir(os.path.dirname(out))
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     print(f"dprime {area}/{backbone} {dataset}: non-sparse n={len(neurons_ns)} -> {out}", flush=True)
@@ -266,7 +266,8 @@ def fig_similarity(area, backbone, dataset):
     _despine(ax)
     _panel(ax, "f")
 
-    out = os.path.join(ensure_dir(os.path.join(FIGS, area, backbone)), f"dreamsim_similarity_{dataset}.pdf")
+    out = registry.fig_path(area, backbone, *registry.rel_dreamsim(dataset), "similarity.pdf")
+    ensure_dir(os.path.dirname(out))
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     print(f"similarity {area}/{backbone} {dataset}: non-sparse n{ex_ns}, sparse n{ex_sp} -> {out}", flush=True)
@@ -278,6 +279,7 @@ if __name__ == "__main__":
     parser.add_argument("--backbone", required=True, choices=registry.BACKBONES)
     parser.add_argument("--dataset", choices=["rendered", "imagenet"], default=None, help="default: both")
     args = parser.parse_args()
+    registry.check_pair(args.area, args.backbone, parser)
 
     datasets = [args.dataset] if args.dataset else ["rendered", "imagenet"]
     for dataset in datasets:

@@ -547,7 +547,7 @@ if __name__ == "__main__":
     from pathlib import Path
     from dotenv import load_dotenv
     load_dotenv()
-    from dualneuron.utils import env_dir, ensure_dir, RewriteLine
+    from dualneuron.utils import env_dir, ensure_dir, RewriteLine, should_compute
     from dualneuron.twins import registry
 
     ANALYSIS_DIR = env_dir("ANALYSIS_DIR")
@@ -558,10 +558,9 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, default="rendered", help="rendered or imagenet")
     parser.add_argument("--embeddings", type=str, default=None,
                         help="npz with 'embeddings' and 'indices' (default ANALYSIS_DIR/{area}/{backbone}/dreamsim_{dataset}_embeddings.npz)")
-    parser.add_argument("--analysis_dir", type=str, default=None,
-                        help="dir with ensemble_{dataset}_ordered_{responses,indices}.npz (default ANALYSIS_DIR/{area}/{backbone})")
     parser.add_argument("--output", type=str, default=None,
-                        help="npz to save the results (default ANALYSIS_DIR/{area}/{backbone}/similarity_{dataset}.npz)")
+                        help="npz to save the results (default ANALYSIS_DIR/{area}/{backbone}/{dataset}/dreamsim/similarity.npz)")
+    parser.add_argument("--rewrite", action="store_true", help="recompute + overwrite even if results exist")
     parser.add_argument("--k", type=int, default=10, help="MAIs/LAIs per pole for d-prime (Fig 6)")
     parser.add_argument("--n_poles", type=int, default=15, help="images per pole for the R^2 space (Fig 10)")
     parser.add_argument("--n_iterations", type=int, default=100, help="random draws averaged per control")
@@ -571,19 +570,22 @@ if __name__ == "__main__":
     parser.add_argument("--log_every", type=float, default=10.0,
                         help="min seconds between progress-line updates")
     args = parser.parse_args()
+    registry.check_pair(args.area, args.backbone, parser)
 
-    if ANALYSIS_DIR is None and (args.analysis_dir is None or args.embeddings is None):
+    if ANALYSIS_DIR is None and args.embeddings is None:
         raise ValueError(
             "ANALYSIS_DIR is not set. Set it in .env (e.g. "
-            "ANALYSIS_DIR=${DATA_DIR}/DUAL-FEATURE-ANALYSIS) or pass "
-            "--analysis_dir and --embeddings explicitly."
+            "ANALYSIS_DIR=${DATA_DIR}/DUAL-FEATURE-ANALYSIS) or pass --output/--embeddings explicitly."
         )
-    analysis_dir = args.analysis_dir or registry.analysis_dir(args.area, args.backbone)
+    output = args.output or registry.similarity_path(args.area, args.backbone, args.dataset)
+    if not should_compute(output, args.rewrite):
+        print(f"cached (use --rewrite to recompute): {output}")
+        raise SystemExit(0)
     emb_path = args.embeddings or registry.dreamsim_embeddings_path(args.area, args.backbone, args.dataset)
     emb = np.load(emb_path)
     embeddings, indices = emb["embeddings"], emb["indices"]
-    ordered_responses = np.load(os.path.join(analysis_dir, f"ensemble_{args.dataset}_ordered_responses.npz"))
-    ordered_indices = np.load(os.path.join(analysis_dir, f"ensemble_{args.dataset}_ordered_indices.npz"))
+    ordered_responses = np.load(registry.screening_path(args.area, args.backbone, args.dataset, "responses"))
+    ordered_indices = np.load(registry.screening_path(args.area, args.backbone, args.dataset, "indices"))
 
     # Restrict to the well-predicted neurons (inclusion criterion, correlation > 0.4); the
     # ordered npz files hold every screened neuron, but only the well-predicted ones' extremes
@@ -594,7 +596,8 @@ if __name__ == "__main__":
     # (clean in any editor), mirroring the screening / synthesis runs.
     log_path = args.log_path
     if log_path is None and LOGS_DIR is not None:
-        log_path = os.path.join(LOGS_DIR, args.area, args.backbone, f"similarity_{args.dataset}.log")
+        log_path = registry.log_path(args.area, args.backbone,
+                                     *registry.rel_dreamsim(args.dataset), "similarity.log")
     log_file = None
     progress = None
     if log_path is not None:
@@ -640,7 +643,6 @@ if __name__ == "__main__":
         log_file.write(f"done in {elapsed:.0f}s\n")
         log_file.flush()
 
-    output = args.output or registry.similarity_path(args.area, args.backbone, args.dataset)
     ensure_dir(Path(output).parent)
     np.savez(output,
              **{f"coh_{key}": val for key, val in coh.items()},

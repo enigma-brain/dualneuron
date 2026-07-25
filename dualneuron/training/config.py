@@ -45,7 +45,7 @@ TWIN_SPECS = {
     ("v4", "dino"):     dict(kind="dino", fine_tune=False,
                              model_name="dinov3_vitb16", layer_name=None,
                              feature_dim=768, spatial_size=14, block=4, readout_type="fullgaussian2d",
-                             readout_nonlin="relu", elu_offset=-1, gamma_readout=3.0),
+                             readout_nonlin="gelu", elu_offset=-1, gamma_readout=3.0),
     ("v1", "convnext"): dict(kind="nnvision", fine_tune=True,
                              model_name="facebook/convnextv2-atto-1k-224",
                              layer_name="convnextv2.encoder.stages.1.layers.0",
@@ -91,7 +91,8 @@ class TrainConfig:
 
     # System.
     device: str = "cuda"
-    num_workers: int = 0
+    num_workers: int = 0            # training loader (reads the in-RAM cache; 0 avoids worker copies)
+    extract_num_workers: int = 4    # extraction/caching loader (parallel CIFS reads + GPU overlap)
     pin_memory: bool = True
 
     # Optional explicit overrides (else taken from the spec in __post_init__).

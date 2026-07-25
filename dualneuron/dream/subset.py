@@ -12,7 +12,7 @@ import numpy as np
 from dotenv import load_dotenv
 load_dotenv()
 
-from dualneuron.utils import env_dir, ensure_dir
+from dualneuron.utils import env_dir, ensure_dir, should_compute
 from dualneuron.twins import registry
 
 ANALYSIS_DIR = env_dir("ANALYSIS_DIR")
@@ -46,7 +46,7 @@ def build_imagenet_subset(area, backbone, k=15, n_sample=200000, seed=0, total=1
     """
     neurons = registry.well_predicted_neurons(area, backbone)
     if ordered_indices_path is None:
-        ordered_indices_path = registry.screening_path(area, backbone, "ensemble", "imagenet", "indices")
+        ordered_indices_path = registry.screening_path(area, backbone, "imagenet", "indices")
     ordered = np.load(ordered_indices_path)
 
     extremes = set()
@@ -79,12 +79,17 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--total", type=int, default=1281167, help="number of screened ImageNet images")
     parser.add_argument("--output_path", type=str, default=None,
-                        help="default ANALYSIS_DIR/{area}/{backbone}/dreamsim_imagenet_indices.npy")
+                        help="default ANALYSIS_DIR/{area}/{backbone}/imagenet/dreamsim/indices.npy")
+    parser.add_argument("--rewrite", action="store_true", help="recompute + overwrite even if it exists")
     args = parser.parse_args()
+    registry.check_pair(args.area, args.backbone, parser)
 
+    out = args.output_path or registry.dreamsim_indices_path(args.area, args.backbone)
+    if not should_compute(out, args.rewrite):
+        print(f"cached (use --rewrite to recompute): {out}")
+        raise SystemExit(0)
     res = build_imagenet_subset(args.area, args.backbone, k=args.k, n_sample=args.n_sample,
                                 seed=args.seed, total=args.total)
-    out = args.output_path or registry.dreamsim_indices_path(args.area, args.backbone)
     ensure_dir(os.path.dirname(out))
     np.save(out, res["subset"])
     print(f"{args.area}/{args.backbone}: {len(res['extremes'])} extremes + {len(res['sample'])} sampled "

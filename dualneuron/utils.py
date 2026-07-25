@@ -52,6 +52,43 @@ def ensure_dir(path):
     return directory
 
 
+def should_compute(path, rewrite=False):
+    """Central rewrite gate: True if an artifact must be (re)computed rather than reused.
+
+    Returns True when ``rewrite`` is set, when ``path`` is None, or when the file is absent — i.e.
+    exactly when a producer should compute + write. This is the single primitive behind every
+    ``--rewrite`` flag, replacing the ad-hoc ``if os.path.exists(...): skip`` scattered across
+    features/screening/synthesis. Producers with a bespoke save (multi-array npz, per-neuron loops,
+    figures) call this directly; simple one-file producers can use :func:`load_or_compute`.
+    """
+    return rewrite or path is None or not os.path.exists(path)
+
+
+def load_or_compute(path, compute, rewrite=False, load=None, save=None):
+    """Load ``path`` if present (and not ``rewrite``), else ``compute()`` + save to ``path``.
+
+    Convenience wrapper over :func:`should_compute` for the common one-file case: default reuses the
+    saved form; ``rewrite=True`` recomputes and overwrites. Parent dirs are created on write.
+
+    Args:
+        path: Cache file path.
+        compute: Zero-arg callable producing the result when (re)computing.
+        rewrite: If True, always recompute + overwrite.
+        load: Loader ``load(path)`` (default ``numpy.load``).
+        save: Saver ``save(path, result)`` (default ``numpy.save``).
+    """
+    import numpy as np
+    load = load or np.load
+    save = save or (lambda p, r: np.save(p, r))
+    if not should_compute(path, rewrite):
+        return load(path)
+    result = compute()
+    if path is not None:
+        ensure_dir(os.path.dirname(path))
+        save(path, result)
+    return result
+
+
 class RewriteLine:
     """
     File-like sink that collapses a tqdm progress bar to one rewritten line.

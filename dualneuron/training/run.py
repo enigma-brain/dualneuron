@@ -29,6 +29,7 @@ import torch
 from dotenv import load_dotenv
 
 from dualneuron.training.config import TrainConfig, BACKBONES, AREAS
+from dualneuron.twins import registry
 
 load_dotenv()
 
@@ -112,11 +113,11 @@ def _run_pool(args, seeds, gpus):
     train_ids, _, _ = build_response_matrix(sessions, "train")
     test_ids, _, _ = build_response_matrix(sessions, "test")
     if config.cache_kind == "images":
-        cache_train = cache_images(config, train_ids, "train")
-        cache_images(config, test_ids, "test")
+        cache_train = cache_images(config, train_ids, "train", rewrite=args.rewrite)
+        cache_images(config, test_ids, "test", rewrite=args.rewrite)
     else:
-        cache_train = extract_features(config, train_ids, "train", device=dev)
-        extract_features(config, test_ids, "test", device=dev)
+        cache_train = extract_features(config, train_ids, "train", device=dev, rewrite=args.rewrite)
+        extract_features(config, test_ids, "test", device=dev, rewrite=args.rewrite)
 
     # 2) Queue-based pool, capped so concurrent members fit the cgroup memory limit.
     gpus = list(dict.fromkeys(gpus))
@@ -131,6 +132,12 @@ def _run_pool(args, seeds, gpus):
             seed = pending.pop(0)
             env = os.environ.copy()
             env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+            # One member per GPU -> keep each single-threaded on the CPU so N concurrent members
+            # don't oversubscribe the host's cores. The GPU does the work; the CPU only feeds batches.
+            env.setdefault("OMP_NUM_THREADS", "1")
+            env.setdefault("MKL_NUM_THREADS", "1")
+            env.setdefault("OPENBLAS_NUM_THREADS", "1")
+            env.setdefault("NUMEXPR_NUM_THREADS", "1")
             active[gpu] = (seed, subprocess.Popen(_member_cmd(args, seed), env=env))
             plog(f"[pool] seed {seed} -> GPU {gpu}", flush=True)
         time.sleep(5)
@@ -173,12 +180,18 @@ def main():
     p.add_argument("--num_workers", type=int, default=None)
     p.add_argument("--device", default=None, help="Torch device (default: cuda if available, else cpu).")
     p.add_argument("--log_path", default=None, help="Log file (default LOGS_DIR/{area}_{backbone}_*.log).")
+    p.add_argument("--rewrite", action="store_true",
+                   help="Recompute the input cache (features/images) even if it exists (e.g. after a "
+                        "transform change). The pool applies it to its one up-front cache step; member "
+                        "workers always reuse that rebuilt cache.")
     args = p.parse_args()
+    registry.check_pair(args.area, args.backbone, p)
 
     # Single member (pool worker, or standalone).
     if args.member is not None:
         from dualneuron.training.trainer import train_member
-        train_member(_build_config(args), args.member, device=args.device, log_path=args.log_path)
+        train_member(_build_config(args), args.member, device=args.device, log_path=args.log_path,
+                     rewrite=args.rewrite)
         return
 
     # Multi-GPU pool.
@@ -192,7 +205,7 @@ def main():
     from dualneuron.training.trainer import train_ensemble
     config = _build_config(args)
     seeds = tuple(int(s) for s in args.seeds.split(","))
-    train_ensemble(config, seeds=seeds, device=args.device, log_path=args.log_path)
+    train_ensemble(config, seeds=seeds, device=args.device, log_path=args.log_path, rewrite=args.rewrite)
 
 
 if __name__ == "__main__":

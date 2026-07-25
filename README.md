@@ -36,7 +36,7 @@ Traditional views characterize neurons by what excites them. Our work reveals a 
 ### One organizing principle: `(area, backbone)`
 Everything in the pipeline — training, screening, synthesis, DreamSim, figures — is keyed by an `(area, backbone)` **twin**. This single convention runs end to end:
 
-- Every command takes **`--area {v4,v1} --backbone {resnet,dino,convnext}`** (both required).
+- Every command takes **`--area {v4,v1} --backbone {resnet,dino,convnext,data_driven}`** (both required).
 - Every output lives under **`{area}/{backbone}/`** — for cached features, trained weights, analysis results, figures, and logs alike.
 - A central registry, [`dualneuron/twins/registry.py`](dualneuron/twins/registry.py), is the **single source of truth**: given `(area, backbone)` it resolves the model, its geometry/normalization, its screening/synthesis constants, and where every artifact is read/written.
 
@@ -45,13 +45,21 @@ Everything in the pipeline — training, screening, synthesis, DreamSim, figures
 | `--area` | `--backbone` | Model | Neurons | Input | Core | Staged? |
 |---|---|---|---|---|---|---|
 | `v4` | `resnet` | color V4 | 394 | 100×100 RGB | ResNet50 L2-robust (frozen) | ✅ shipped |
+| `v4` | `data_driven` | color V4, data-driven | 394 | 100×100 RGB | ResNet50 (`resnet50_l2_eps0_1`) | ✅ shipped |
 | `v4` | `dino` | color V4 | 394 | 224×224 RGB | DINOv3 ViT-B/16 block 4 (frozen) | trained |
 | `v1` | `convnext` | grayscale V1 | 458 | 93×93 gray | ConvNeXtV2-atto (fine-tuned) | ✅ shipped |
 | `v1` | `dino` | grayscale V1 | 458 | 224×224 gray | DINOv3 ViT-B/16 block 1 (fine-tuned) | trained |
 
-The two **shipped** twins (`v4/resnet` = `V4ColorTaskDriven`, `v1/convnext` = `V1GrayTaskDriven`) come with weights, `correlations.npy` and `mask.npy` under `dualneuron/twins/`; the DINO twins are produced by [training](#training-digital-twins) (the gated DINOv3 weights are not redistributed). Each twin uses **ensemble averaging** (5 members) and a Gaussian readout.
+The **shipped** twins (`v4/resnet` = `V4ColorTaskDriven`, `v4/data_driven` = `V4ColorDataDriven`, `v1/convnext` = `V1GrayTaskDriven`) come with weights and `correlations.npy` under `dualneuron/twins/`, plus `mask.npy` for all but `v4/data_driven`; the DINO twins are produced by [training](#training-digital-twins) (the gated DINOv3 weights are not redistributed). Each twin uses **ensemble averaging** (5 members) and a Gaussian readout.
 
 > **Staged twins are read-only.** The shipped weights / `correlations.npy` / `mask.npy` under `dualneuron/twins/` are never modified. Anything you train or regenerate is written to `TRAINED_MODELS_DIR/{area}/{backbone}/` (weights + correlations) or `ANALYSIS_DIR/{area}/{backbone}/` (a regenerated mask), never back into `twins/`.
+
+`v4/data_driven` (`dualneuron/twins/V4ColorDataDriven/`) is the **data-driven** counterpart of the
+task-driven color-V4 twin: same architecture, same input geometry (3×100×100, mean 113.5 / std 59.58)
+and the same 394 V4 neurons in the same order, differing only in its trained weights. It ships with
+weights + `correlations.npy` (mean 0.411, median 0.419, 205 of 394 neurons above the 0.4 threshold,
+recomputed on the recorded test set with the same procedure as `eval_ensemble`), but **no** `mask.npy`
+— run `synthesis.generate` then `synthesis.mask` to produce one, as for any non-staged twin.
 
 ## Installation
 
@@ -138,6 +146,7 @@ from dualneuron.twins.nets import load_model
 
 # staged twins (weights_dir=None -> GitHub-staged):
 m = load_model("v4", ensemble=True, centered=False)                                    # v4/resnet
+m = load_model("v4_data_driven", ensemble=True, centered=False)                        # v4/data_driven
 m = load_model("v1", ensemble=True, centered=False)                                    # v1/convnext
 # trained twins (weights_dir=None -> TRAINED_MODELS_DIR/{area}/{backbone}):
 m = load_model("v4_dino", ensemble=True)                                               # v4/dino
@@ -148,6 +157,16 @@ m = load_model("v4", ensemble=True, weights_dir=".../trained_models/v4/resnet")
 
 `centered=True` sets the readout to image center (for MEI synthesis); `centered=False` keeps the learned
 receptive-field positions (for predicting recorded responses).
+
+The per-twin loaders can also be imported directly. They take the same arguments as `load_model`, but
+return the model where nnvision built it (core on `cuda:0`, readout on CPU), so call `.eval().to(device)`
+yourself — `load_model` does that for you:
+
+```python
+from dualneuron.twins.nets import V4ColorDataDriven
+
+m = V4ColorDataDriven(ensemble=True, centered=False).eval().to("cuda")   # (batch, 3, 100, 100) -> (batch, 394)
+```
 
 ## Training digital twins
 
@@ -317,10 +336,11 @@ dualneuron/
 ├── utils.py                # env_dir, ensure_dir, RewriteLine (twin-aware helpers live in twins/registry)
 ├── twins/
 │   ├── registry.py         # (area, backbone) registry: geometry, arch, paths, correlations/mask, neuron selection
-│   ├── nets.py             # loaders: V4ColorTaskDriven, V1GrayTaskDriven, V4ColorDino, V1GrayDino, load_model
+│   ├── nets.py             # loaders: V4ColorTaskDriven, V4ColorDataDriven, V1GrayTaskDriven, V4ColorDino, V1GrayDino, load_model
 │   ├── dino.py             # DINOv3 model classes (frozen or truncated fine-tuned core + Gaussian readout)
 │   ├── activations.py      # activation-extraction utilities
-│   └── V4ColorTaskDriven/, V1GrayTaskDriven/, V4GrayTaskDriven/   # shipped weights + mask.npy + correlations.npy
+│   ├── V4ColorTaskDriven/, V1GrayTaskDriven/, V4GrayTaskDriven/   # shipped weights + mask.npy + correlations.npy
+│   └── V4ColorDataDriven/  # shipped weights + correlations.npy (data-driven color V4; no mask.npy)
 ├── screening/run.py        # screen_activations (--field masked|full, --n_sample); sets.py, utils.py, visualize.py
 ├── synthesis/              # ascend.py, generate.py, mask.py, ops.py, visualize.py, priors/
 ├── dream/                  # sim.py, subset.py, similarity.py, axis.py  (DreamSim analyses)

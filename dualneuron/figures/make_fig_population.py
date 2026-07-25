@@ -29,13 +29,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from dotenv import load_dotenv
 
-from dualneuron.utils import env_dir, ensure_dir
+from dualneuron.utils import ensure_dir
 from dualneuron.twins import registry
 from dualneuron.data.recordings import load_sessions, build_response_matrix
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(REPO_ROOT / ".env")
-FIGS = env_dir("PAPER_FIG_DIR", str(REPO_ROOT / "figs"))
 N_EXTREME = 10           # reference analyze_neuron_relationships uses 10 (paper text says 15)
 N_BINS = 10
 COND = {"MAI": "#c0392b", "LAI": "#2f6db0", "random": "0.6"}
@@ -106,7 +105,7 @@ def main(area, backbone):
     subject = {m["global_idx"]: m["subject_id"] for m in meta}
 
     # screening (imagenet) sorted indices for the non-sparse neurons
-    oi = np.load(registry.screening_path(area, backbone, "ensemble", "imagenet", "indices"))
+    oi = np.load(registry.screening_path(area, backbone, "imagenet", "indices"))
     idx_by_neuron = {g: oi[f"unit_{g}"] for g in nonsparse}
     n_images = len(next(iter(idx_by_neuron.values())))
     print(f"[info] non-sparse neurons={len(nonsparse)}  images={n_images}  subjects={sorted(set(subject.values()))}", flush=True)
@@ -129,7 +128,8 @@ def main(area, backbone):
         print(f"[stats] within {c}: bin0(low%)={m[0]:.3f} bin9(high%)={m[-1]:.3f}", flush=True)
 
     fig.tight_layout()
-    out = os.path.join(ensure_dir(os.path.join(FIGS, area, backbone)), "fig_population.pdf")
+    out = registry.fig_path(area, backbone, "population.pdf")
+    ensure_dir(os.path.dirname(out))
     fig.savefig(out, dpi=300)
     plt.close(fig)
     print(f"saved {out}", flush=True)
@@ -141,4 +141,5 @@ if __name__ == "__main__":
     p.add_argument("--area", required=True, choices=registry.AREAS)
     p.add_argument("--backbone", required=True, choices=registry.BACKBONES)
     args = p.parse_args()
+    registry.check_pair(args.area, args.backbone, p)
     main(args.area, args.backbone)

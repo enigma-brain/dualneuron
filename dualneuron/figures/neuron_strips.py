@@ -33,7 +33,6 @@ load_dotenv(REPO_ROOT / ".env")
 ANALYSIS_DIR = env_dir("ANALYSIS_DIR")
 RENDERED_DIR = env_dir("RENDERED_DIR")
 IMAGENET_CACHE_DIR = env_dir("IMAGENET_CACHE_DIR")
-FIGS = env_dir("PAPER_FIG_DIR", str(REPO_ROOT / "figs"))
 
 # Per-area display accent (V4 blue, V1 orange). Geometry, channels, and the RF mask come from the
 # registry; the colormap follows the channel count (1 -> grayscale).
@@ -83,8 +82,8 @@ def figure(area, backbone, dataset, neurons, field="masked"):
     cmap = "gray" if spec.channels == 1 else None
     accent = ACCENT[area]
     ds = _build_dataset(area, backbone, dataset, field)
-    idx = np.load(registry.screening_path(area, backbone, "ensemble", dataset, "indices", field=field))
-    resp = np.load(registry.screening_path(area, backbone, "ensemble", dataset, "responses", field=field))
+    idx = np.load(registry.screening_path(area, backbone, dataset, "indices", field=field))
+    resp = np.load(registry.screening_path(area, backbone, dataset, "responses", field=field))
     imshow_kw = {} if cmap is None else dict(vmin=0, vmax=1)
 
     nb = len(neurons)
@@ -117,9 +116,8 @@ def figure(area, backbone, dataset, neurons, field="masked"):
     fig.text(0.5 * (0.11 + 0.92), 0.025, "weaker  ←  activation  →  stronger",
              ha="center", va="center", fontsize=10, color="0.3")
 
-    out_dir = ensure_dir(os.path.join(FIGS, area, backbone))
-    suffix = "" if field == "masked" else "_fullfield"
-    path = os.path.join(out_dir, f"neuron_strips_{dataset}{suffix}.pdf")
+    path = registry.fig_path(area, backbone, *registry.rel_screening(dataset, field), "neuron_strips.pdf")
+    ensure_dir(os.path.dirname(path))
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
     print(f"{area}/{backbone} {dataset} ({field}): neurons {[n for n, _ in neurons]} -> {path}", flush=True)
@@ -136,6 +134,7 @@ if __name__ == "__main__":
     parser.add_argument("--neurons", type=int, nargs="+", default=None,
                         help="override the neuron set (still ordered by skewness)")
     args = parser.parse_args()
+    registry.check_pair(args.area, args.backbone, parser)
 
     # Neuron selection is by masked-screening skewness (same neurons across regimes -> comparable);
     # full-field screening currently exists for imagenet only, so default to it there.

@@ -74,18 +74,18 @@ def correlation_to_average(preds, recorded_avg):
     return out
 
 
-def single_trial_correlation(preds, sessions, test_ids):
+def single_trial_correlation(preds, sessions, test_ids, area):
     """Per-neuron correlation between predictions and every individual test trial.
 
     For each neuron, pairs the prediction for an image with each single-trial response to that image
-    (spike count summed over time-bins ``SKIP_BINS:``), and correlates across all pairs.
+    (spike count summed over time-bins ``SKIP_BINS[area]:``), and correlates across all pairs.
     """
     id_to_row = {int(i): r for r, i in enumerate(test_ids)}
     n_neurons = preds.shape[1]
     out = np.full(n_neurons, np.nan)
     g = 0
     for sess in sessions:
-        sc = sess["testing_responses"][:, SKIP_BINS:, :].sum(axis=1).astype(np.float32)  # (units, trials)
+        sc = sess["testing_responses"][:, SKIP_BINS[area]:, :].sum(axis=1).astype(np.float32)  # (units, trials)
         rows = np.array([id_to_row[int(t)] for t in sess["testing_image_ids"]])
         for ui in range(sc.shape[0]):
             p = preds[rows, g + ui]
@@ -133,7 +133,7 @@ def main():
     preds = predict(config, args.weights_dir, test_ids, device)
 
     avg = correlation_to_average(preds, recorded_avg)
-    single = single_trial_correlation(preds, sessions, test_ids)
+    single = single_trial_correlation(preds, sessions, test_ids, config.area)
     staged = np.load(_staged_corr_path(args.area))
 
     va = ~np.isnan(avg)

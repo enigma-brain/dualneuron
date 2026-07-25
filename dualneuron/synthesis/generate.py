@@ -26,7 +26,7 @@ from dualneuron.twins.nets import load_model
 from dualneuron.twins import registry
 from dualneuron.dream.axis import population_axis
 from dualneuron.synthesis.ascend import pixel_ascending, fourier_ascending
-from dualneuron.utils import ensure_dir, env_dir, RewriteLine
+from dualneuron.utils import ensure_dir, env_dir, RewriteLine, should_compute
 
 ANALYSIS_DIR = env_dir("ANALYSIS_DIR")
 LOGS_DIR = env_dir("LOGS_DIR")
@@ -98,7 +98,7 @@ def _objective(model, neuron_id, weight):
 
 def generate(area, backbone, output_dir=None, num_seeds=10, neurons=None,
              weights_dir=None, mode="free", axis_k=20, axis_field="full",
-             device="cuda", log_path=None, log_every=30.0):
+             rewrite=False, device="cuda", log_path=None, log_every=30.0):
     """
     Synthesize MEIs and LEIs for a twin's neurons, one npz per neuron.
 
@@ -167,14 +167,14 @@ def generate(area, backbone, output_dir=None, num_seeds=10, neurons=None,
                 "ANALYSIS_DIR is not set. Set it in .env "
                 "(e.g. ANALYSIS_DIR=${DATA_DIR}/DUAL-FEATURE-ANALYSIS) or pass output_dir."
             )
-        output_dir = registry.synthesis_dir(area, backbone, variant=mode)
+        output_dir = registry.synthesis_output_dir(area, backbone, variant=mode)
     output_dir = ensure_dir(output_dir)
 
     def out_file(neuron_id):
         return os.path.join(output_dir, f"neuron{neuron_id:04d}.npz")
 
     # Resume: skip neurons already written.
-    todo = [n for n in neurons if not os.path.exists(out_file(n))]
+    todo = [n for n in neurons if should_compute(out_file(n), rewrite)]
     done = len(neurons) - len(todo)
 
     # Optional progress log: one line rewritten in place, bracketed by a header and
@@ -268,17 +268,19 @@ if __name__ == '__main__':
                              "natural population axis; needs the twin's full-field screening)")
     parser.add_argument("--axis_k", type=int, default=20, help="MAIs/LAIs per centroid for the axis (mode=axis)")
     parser.add_argument("--axis_field", type=str, default="full", help="screening regime for the axis")
+    parser.add_argument("--rewrite", action="store_true", help="re-synthesize neurons even if their npz exists")
     parser.add_argument("--device", type=str, default="cuda", help="device to run on")
     parser.add_argument("--log_path", type=str, default=None,
-                        help="progress log file (default LOGS_DIR/{area}_{backbone}_synthesis.log)")
+                        help="progress log file (default LOGS_DIR/{area}/{backbone}/synthesis/{mode}/generate.log)")
     parser.add_argument("--log_every", type=float, default=30.0,
                         help="min seconds between progress-line updates")
     args = parser.parse_args()
+    registry.check_pair(args.area, args.backbone, parser)
 
     log_path = args.log_path
     if log_path is None and LOGS_DIR is not None:
-        stem = "synthesis" if args.mode == "free" else f"synthesis_{args.mode}"
-        log_path = os.path.join(LOGS_DIR, args.area, args.backbone, f"{stem}.log")
+        log_path = registry.log_path(args.area, args.backbone,
+                                     *registry.rel_synthesis(args.mode), "generate.log")
 
     generate(
         area=args.area,
@@ -290,6 +292,7 @@ if __name__ == '__main__':
         mode=args.mode,
         axis_k=args.axis_k,
         axis_field=args.axis_field,
+        rewrite=args.rewrite,
         device=args.device,
         log_path=log_path,
         log_every=args.log_every,

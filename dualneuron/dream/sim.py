@@ -10,7 +10,7 @@ load_dotenv()
 from pathlib import Path
 from dualneuron.screening.sets import ImagenetImages, RenderedImages
 from dualneuron.twins import registry
-from dualneuron.utils import ensure_dir, env_dir, RewriteLine
+from dualneuron.utils import ensure_dir, env_dir, RewriteLine, should_compute
 
 import numpy as np
 import torch
@@ -82,6 +82,7 @@ def embeddings(
     log_path=None,
     log_every=30.0,
     indices=None,
+    rewrite=False,
 ):
     """
     Extract DreamSim embeddings from images with mask applied.
@@ -145,9 +146,13 @@ def embeddings(
     cache_dir = cache_dir or MODELS_DIR
 
     # Load DreamSim model
+    if output_path is not None and not should_compute(output_path, rewrite):
+        print(f"cached (use --rewrite to recompute): {output_path}")
+        return
+
     model, _ = dreamsim(
-        pretrained=True, 
-        device=device, 
+        pretrained=True,
+        device=device,
         cache_dir=cache_dir,
         dreamsim_type="ensemble",
     )
@@ -283,10 +288,12 @@ if __name__ == "__main__":
     parser.add_argument("--bg_value", type=float, default=0.45, help="Gray value for masked background (~0.45 reads ~0 to DreamSim)")
     parser.add_argument("--batch_size", type=int, default=32, help="batch size for dataloader")
     parser.add_argument("--num_workers", type=int, default=0, help="number of workers for dataloader")
-    parser.add_argument("--log_path", type=str, default=None, help="Progress log file (default LOGS_DIR/{area}_dreamsim_{dataset}.log)")
+    parser.add_argument("--log_path", type=str, default=None, help="Progress log file (default LOGS_DIR/{area}/{backbone}/{dataset}/dreamsim/dreamsim.log)")
+    parser.add_argument("--rewrite", action="store_true", help="recompute + overwrite even if embeddings exist")
     parser.add_argument("--log_every", type=float, default=30.0, help="Min seconds between progress-line updates")
     parser.add_argument("--indices_path", type=str, default=None, help="Path to a .npy of dataset indices to embed (e.g. the imagenet subset); default embeds all")
     args = parser.parse_args()
+    registry.check_pair(args.area, args.backbone, parser)
 
     # Subset to embed: an explicit index file (e.g. the imagenet subset), else all images.
     indices = np.load(args.indices_path) if args.indices_path is not None else None
@@ -312,10 +319,9 @@ if __name__ == "__main__":
         output_path = registry.dreamsim_embeddings_path(args.area, args.backbone, args.dataset)
 
     log_path = args.log_path
-    if log_path is None:
-        logs_dir = os.getenv("LOGS_DIR")
-        if logs_dir is not None:
-            log_path = os.path.join(logs_dir, args.area, args.backbone, f"dreamsim_{args.dataset}.log")
+    if log_path is None and os.getenv("LOGS_DIR"):
+        log_path = registry.log_path(args.area, args.backbone,
+                                     *registry.rel_dreamsim(args.dataset), "dreamsim.log")
 
     embeddings(
         data_dir=data_dir,
@@ -338,5 +344,6 @@ if __name__ == "__main__":
         log_path=log_path,
         log_every=args.log_every,
         indices=indices,
+        rewrite=args.rewrite,
     )
     

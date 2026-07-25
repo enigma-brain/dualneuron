@@ -41,17 +41,15 @@ TRAINED_MODELS_DIR = os.getenv("TRAINED_MODELS_DIR") or (
 _TWINS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-def _member_paths(weights_dir, model_folder, staged_names, clean_prefix):
-    """Resolve the ensemble member weight files.
+def _member_paths(weights_dir, model_folder, n_members):
+    """Resolve the ensemble member weight files, named uniformly ``member_{i}.pth.tar`` (1-indexed).
 
-    When ``weights_dir`` is None, use the GitHub-staged files in ``twins/<model_folder>`` (their
-    original names). Otherwise use the clean per-area/backbone naming ``{clean_prefix}_{i}.pth.tar``
-    written by ``dualneuron.training`` under ``weights_dir``.
+    When ``weights_dir`` is None, use the GitHub-staged files in ``twins/<model_folder>``; otherwise
+    use the same ``member_{i}.pth.tar`` names under ``weights_dir`` (the per-area/backbone trained dir
+    written by ``dualneuron.training``). The folder resolves the twin, so the filename is constant.
     """
-    if weights_dir is None:
-        return [os.path.join(_TWINS_DIR, model_folder, n) for n in staged_names]
-    return [os.path.join(weights_dir, f"{clean_prefix}_{i}.pth.tar")
-            for i in range(1, len(staged_names) + 1)]
+    base = os.path.join(_TWINS_DIR, model_folder) if weights_dir is None else weights_dir
+    return [os.path.join(base, f"member_{i}.pth.tar") for i in range(1, n_members + 1)]
 
 
 def V4ColorTaskDriven(
@@ -77,7 +75,7 @@ def V4ColorTaskDriven(
         untrained (bool): If True, returns model with random weights
             (architecture only). Default: False.
         weights_dir (str, optional): Directory of user-trained ensemble weights
-            (named ``v4_resnet_{i}.pth.tar``), e.g. ``TRAINED_MODELS_DIR/v4/resnet``.
+            (named ``member_{i}.pth.tar``), e.g. ``TRAINED_MODELS_DIR/v4/resnet``.
             If None (default), loads the GitHub-staged weights.
 
     Returns:
@@ -121,15 +119,7 @@ def V4ColorTaskDriven(
         }
     }
     
-    ensemble_names = [
-        '33bd3a8c2c7dd6916c98ba7ad557eade.pth.tar',
-        '44370def81b37c0588e260d6284610fe.pth.tar',
-        'a1e5fa8957a5e802b51d70c31c87b62b.pth.tar',
-        'ad6a12061d8a8ba02d04dd7b142ebc71.pth.tar',
-        'c0f9f75fd8743c363df3f32dfbf88a7f.pth.tar'
-    ]
-    
-    member_paths = _member_paths(weights_dir, 'V4ColorTaskDriven', ensemble_names, 'v4_resnet')
+    member_paths = _member_paths(weights_dir, 'V4ColorTaskDriven', 5)
     models_list = []
     for i, filename in enumerate(member_paths):
         state_dict = torch.load(filename, map_location='cpu')
@@ -150,6 +140,97 @@ def V4ColorTaskDriven(
     if ensemble:
         model = EnsembleModel(*models_list)
         
+    return model
+
+
+def V4ColorDataDriven(
+    ensemble=False,
+    centered=False,
+    untrained=False,
+    weights_dir=None,
+):
+    """
+    Load the data-driven color V4 neural predictive model.
+
+    The data-driven counterpart of :func:`V4ColorTaskDriven`: the same architecture,
+    input geometry and normalization, predicting the same 394 V4 neurons, but loaded
+    from the ``V4ColorDataDriven`` ensemble weights.
+
+    Args:
+        ensemble (bool): If True, returns an ensemble of 5 models with
+            averaged predictions. If False, returns a single model.
+            Default: False.
+        centered (bool): If True, sets readout positions to image center,
+            removing spatial selectivity. Useful for MEI synthesis.
+            Default: False.
+        untrained (bool): If True, returns model with random weights
+            (architecture only). Default: False.
+        weights_dir (str, optional): Directory of user-trained ensemble weights
+            (named ``member_{i}.pth.tar``). If None (default), loads the
+            GitHub-staged weights.
+
+    Returns:
+        torch.nn.Module: The V4 model (single or ensemble).
+
+    Model Details:
+        - Input: (batch, 3, 100, 100) RGB images
+        - Output: (batch, 394) predicted firing rates
+        - Backbone: ResNet50 L2-robust (layer3.0)
+        - Normalization: mean=113.5, std=59.58
+    """
+
+    model_fn = 'nnvision.models.ptrmodels.task_core_gauss_readout'
+    model_config = {
+        'input_channels': 3,
+        'model_name': 'resnet50_l2_eps0_1',
+        'layer_name': 'layer3.0',
+        'pretrained': False,
+        'bias': False,
+        'final_batchnorm': True,
+        'final_nonlinearity': True,
+        'momentum': 0.1,
+        'fine_tune': False,
+        'init_mu_range': 0.4,
+        'init_sigma_range': 0.6,
+        'readout_bias': True,
+        'gamma_readout': 3.0,
+        'gauss_type': 'isotropic',
+        'elu_offset': -1
+    }
+    training_img_mean = 113.5
+    training_img_std = 59.58
+
+    data_info = {
+        "all_sessions": {
+            "input_dimensions": torch.Size([64, 3, 100, 100]),
+            "input_channels": 3,
+            "output_dimension": 394,
+            "img_mean": training_img_mean,
+            "img_std": training_img_std
+        }
+    }
+
+    member_paths = _member_paths(weights_dir, 'V4ColorDataDriven', 5)
+    models_list = []
+    for i, filename in enumerate(member_paths):
+        state_dict = torch.load(filename, map_location='cpu')
+        model = get_model(
+            model_fn,
+            model_config,
+            seed=10,
+            data_info=data_info,
+            state_dict=None if untrained else state_dict
+        )
+
+        if centered:
+            model.readout['all_sessions'].mu.data.fill_(0)
+
+        models_list.append(model)
+        if not ensemble and i==0: break
+
+    if ensemble:
+        model = EnsembleModel(*models_list)
+
     return model
 
 
@@ -216,7 +297,7 @@ def V1GrayTaskDriven(
         untrained (bool): If True, returns model with random weights
             for both backbone and readout. Default: False.
         weights_dir (str, optional): Directory of user-trained ensemble weights
-            (named ``v1_convnext_{i}.pth.tar``), e.g. ``TRAINED_MODELS_DIR/v1/convnext``.
+            (named ``member_{i}.pth.tar``), e.g. ``TRAINED_MODELS_DIR/v1/convnext``.
             If None (default), loads the GitHub-staged weights.
 
     Returns:
@@ -233,15 +314,7 @@ def V1GrayTaskDriven(
     model_config = _v1_convnext_config(pretrained=False)
     data_info = _v1_convnext_data_info()
 
-    ensemble_names = [
-        'v1_convnext_1.pth.tar',
-        'v1_convnext_2.pth.tar',
-        'v1_convnext_3.pth.tar',
-        'v1_convnext_4.pth.tar',
-        'v1_convnext_5.pth.tar',
-    ]
-    
-    member_paths = _member_paths(weights_dir, 'V1GrayTaskDriven', ensemble_names, 'v1_convnext')
+    member_paths = _member_paths(weights_dir, 'V1GrayTaskDriven', 5)
     models_list = []
     for i, filename in enumerate(member_paths):
         torch.manual_seed(i)
@@ -295,7 +368,7 @@ def V4GrayTaskDriven(
         untrained (bool): If True, returns model with random weights
             (architecture only). Default: False.
         weights_dir (str, optional): Directory of user-trained ensemble weights
-            (named ``v4g_resnet_{i}.pth.tar``), e.g. ``TRAINED_MODELS_DIR/v4g/resnet``.
+            (named ``member_{i}.pth.tar``), e.g. ``TRAINED_MODELS_DIR/v4g/resnet``.
             If None (default), loads the GitHub-staged weights.
 
     Returns:
@@ -341,20 +414,7 @@ def V4GrayTaskDriven(
         }
     }
 
-    ensemble_names = [
-        'task_driven_ensemble_model_01.pth.tar',
-        'task_driven_ensemble_model_02.pth.tar',
-        'task_driven_ensemble_model_03.pth.tar',
-        'task_driven_ensemble_model_04.pth.tar',
-        'task_driven_ensemble_model_05.pth.tar',
-        'task_driven_ensemble_model_06.pth.tar',
-        'task_driven_ensemble_model_07.pth.tar',
-        'task_driven_ensemble_model_08.pth.tar',
-        'task_driven_ensemble_model_09.pth.tar',
-        'task_driven_ensemble_model_10.pth.tar'
-    ]
-
-    member_paths = _member_paths(weights_dir, 'V4GrayTaskDriven', ensemble_names, 'v4g_resnet')
+    member_paths = _member_paths(weights_dir, 'V4GrayTaskDriven', 10)
     models_list = []
     for i, filename in enumerate(member_paths):
         torch.manual_seed(i)
@@ -433,7 +493,7 @@ def V4ColorDino(
     twins (``ensemble``, ``centered``, ``untrained``) so :func:`load_model` treats it uniformly.
 
     Unlike the ResNet/ConvNeXt twins, the trained DINO weights are NOT staged in the repo: they are
-    written by ``dualneuron.training`` to ``TRAINED_MODELS_DIR/v4/dino`` (named ``v4_dino_{i}.pth.tar``).
+    written by ``dualneuron.training`` to ``TRAINED_MODELS_DIR/v4/dino`` (named ``member_{i}.pth.tar``).
     The frozen DINOv3 backbone is license-gated and loaded from ``MODELS_DIR/dinov3``.
 
     Args:
@@ -465,10 +525,10 @@ def V4ColorDino(
 
     models_list = []
     for i in range(1, 6):
-        filename = os.path.join(weights_dir, f"v4_dino_{i}.pth.tar")
+        filename = os.path.join(weights_dir, f"member_{i}.pth.tar")
         model = _load_dino_member(
             filename, n_neurons=n_neurons, model_dir=model_dir, block=block,
-            readout_type=readout_type, readout_nonlin="relu", elu_offset=-1, fine_tune=False,
+            readout_type=readout_type, readout_nonlin="gelu", elu_offset=-1, fine_tune=False,
             untrained=untrained, train_hint="--area v4 --backbone dino")
         if centered:
             model.readout.mu.data.fill_(0)
@@ -500,7 +560,7 @@ def V1GrayDino(
     replicated to 3 channels at the stem.
 
     Trained weights are NOT staged in the repo (like V4 DINO): they are written by
-    ``dualneuron.training`` to ``TRAINED_MODELS_DIR/v1/dino`` (``v1_dino_{i}.pth.tar``); the gated
+    ``dualneuron.training`` to ``TRAINED_MODELS_DIR/v1/dino`` (``member_{i}.pth.tar``); the gated
     DINOv3 backbone is loaded from ``MODELS_DIR/dinov3``.
 
     Args:
@@ -529,7 +589,7 @@ def V1GrayDino(
 
     models_list = []
     for i in range(1, 6):
-        filename = os.path.join(weights_dir, f"v1_dino_{i}.pth.tar")
+        filename = os.path.join(weights_dir, f"member_{i}.pth.tar")
         model = _load_dino_member(
             filename, n_neurons=n_neurons, model_dir=model_dir, block=block,
             readout_type=readout_type, readout_nonlin="gelu", elu_offset=-1, fine_tune=True,
@@ -569,6 +629,8 @@ def load_model(
             - 'v1': V1GrayTaskDriven (grayscale ConvNeXt, 93x93, 458 neurons)
             - 'v1_dino': V1GrayDino (grayscale DINOv3 block-1, 224x224, 458 neurons)
             - 'v4': V4ColorTaskDriven (color ResNet, 100x100, 394 neurons)
+            - 'v4_data_driven': V4ColorDataDriven (data-driven color ResNet,
+              100x100, 394 neurons)
             - 'v4_dino': V4ColorDino (color DINOv3, 224x224, 394 neurons)
             - 'v4g': V4GrayTaskDriven (grayscale, 100x100, 1244 neurons)
             - 'vgg16': VGG16 pretrained on ImageNet
@@ -602,7 +664,7 @@ def load_model(
         AssertionError: If architecture is not recognized.
     """
     assert architecture in [
-        'v4', 'v4_dino', 'v1', 'v1_dino', 'v4g',
+        'v4', 'v4_data_driven', 'v4_dino', 'v1', 'v1_dino', 'v4g',
         'vgg16',
         'vgg16_bn',
         'resnet50',
@@ -611,6 +673,13 @@ def load_model(
     ]
     if architecture == 'v4':
         model = V4ColorTaskDriven(
+            ensemble=ensemble,
+            centered=centered,
+            untrained=untrained,
+            weights_dir=weights_dir
+        )
+    elif architecture == 'v4_data_driven':
+        model = V4ColorDataDriven(
             ensemble=ensemble,
             centered=centered,
             untrained=untrained,

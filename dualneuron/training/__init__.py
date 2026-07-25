@@ -11,7 +11,7 @@ import sys as _sys
 _sys.excepthook = _sys.__excepthook__
 
 from dualneuron.training.config import TrainConfig, TWIN_SPECS, BACKBONES, AREAS
-from dualneuron.training.features import extract_features, feature_path, load_features
+from dualneuron.training.features import extract_features, input_cache_path, load_features
 from dualneuron.training.trainer import (
     train_ensemble,
     train_member,
@@ -23,7 +23,7 @@ from dualneuron.training.trainer import (
 
 __all__ = [
     "TrainConfig", "TWIN_SPECS", "BACKBONES", "AREAS",
-    "extract_features", "feature_path", "load_features",
+    "extract_features", "input_cache_path", "load_features",
     "train_ensemble", "train_member", "aggregate_ensemble", "build_trainable_twin",
     "poisson_loss", "corr_per_neuron",
 ]

@@ -28,14 +28,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from dotenv import load_dotenv
 
-from dualneuron.utils import env_dir, ensure_dir
+from dualneuron.utils import ensure_dir
 from dualneuron.twins import registry
 from dualneuron.data.recordings import load_sessions, build_response_matrix
 from dualneuron.figures.neuron_strips import ACCENT
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(REPO_ROOT / ".env")
-FIGS = env_dir("PAPER_FIG_DIR", str(REPO_ROOT / "figs"))
 SKEW_THRESHOLD = 2.0
 
 
@@ -67,7 +66,7 @@ def main(area, backbone):
             rec_skew[k] = skew(obs)
 
     # screening ordered responses for the example profiles (sorted ascending, per neuron)
-    ordered = np.load(registry.screening_path(area, backbone, "ensemble", "imagenet", "responses"))
+    ordered = np.load(registry.screening_path(area, backbone, "imagenet", "responses"))
 
     ns = int(neurons[np.argmin(model_skew)])          # most non-sparse
     sparse_n = int(neurons[np.argmax(model_skew)])    # most sparse
@@ -108,7 +107,8 @@ def main(area, backbone):
     print(f"[stats] model-vs-recorded skewness r={r:.3f} (n={int(valid.sum())}); "
           f"non-sparse={int((model_skew < SKEW_THRESHOLD).sum())} sparse={int((model_skew >= SKEW_THRESHOLD).sum())}", flush=True)
     fig.tight_layout()
-    out = os.path.join(ensure_dir(os.path.join(FIGS, area, backbone)), "fig_sparsity.pdf")
+    out = registry.fig_path(area, backbone, "sparsity.pdf")
+    ensure_dir(os.path.dirname(out))
     fig.savefig(out, dpi=300)
     plt.close(fig)
     print(f"saved {out}", flush=True)
@@ -120,4 +120,5 @@ if __name__ == "__main__":
     p.add_argument("--area", required=True, choices=registry.AREAS)
     p.add_argument("--backbone", required=True, choices=registry.BACKBONES)
     args = p.parse_args()
+    registry.check_pair(args.area, args.backbone, p)
     main(args.area, args.backbone)

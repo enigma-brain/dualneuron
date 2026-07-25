@@ -36,7 +36,6 @@ from dualneuron.figures.neuron_strips import ACCENT
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(REPO_ROOT / ".env")
-FIGS = env_dir("PAPER_FIG_DIR", str(REPO_ROOT / "figs"))
 THRESHOLD = 0.4
 
 
@@ -98,7 +97,7 @@ def main(area, backbone, weights_dir=None):
     single_corr = np.full(n_neurons, np.nan, dtype=np.float64)
     g = 0
     for sess in sessions:
-        sc = sess["testing_responses"][:, SKIP_BINS:, :].sum(axis=1).astype(np.float32)  # (units, trials)
+        sc = sess["testing_responses"][:, SKIP_BINS[area]:, :].sum(axis=1).astype(np.float32)  # (units, trials)
         rows = np.array([id_to_row[int(t)] for t in sess["testing_image_ids"]])          # (trials,)
         for ui in range(sc.shape[0]):
             p = preds[rows, g + ui]
@@ -133,7 +132,8 @@ def main(area, backbone, weights_dir=None):
         a.set_ylabel("# neurons")
         a.set_xlim(0, 1)
     fig.tight_layout()
-    out = os.path.join(ensure_dir(os.path.join(FIGS, area, backbone)), "fig_accuracy.pdf")
+    out = registry.fig_path(area, backbone, "accuracy.pdf")
+    ensure_dir(os.path.dirname(out))
     fig.savefig(out, dpi=300)
     plt.close(fig)
     print(f"saved {out}", flush=True)
@@ -148,4 +148,5 @@ if __name__ == "__main__":
                    help="trained-ensemble dir (default: staged for resnet/convnext; "
                         "TRAINED_MODELS_DIR/{area}/{backbone} for dino)")
     args = p.parse_args()
+    registry.check_pair(args.area, args.backbone, p)
     main(args.area, args.backbone, args.weights_dir)

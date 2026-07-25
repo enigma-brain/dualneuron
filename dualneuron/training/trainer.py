@@ -385,28 +385,34 @@ def _train_one(config, seed, train_feat, train_resp, train_idx, val_idx,
     return twin, best_val, corr_per_neuron(test_preds, test_resp), test_preds
 
 
-def _load_training_data(config, device):
+def _load_training_data(config, device, rewrite=False, log=None):
     """Load sessions/responses and the cached trainable-part input (extract/cache once if needed).
 
     ``cache_kind="features"`` (frozen core) caches frozen-core feature maps; ``"images"`` (fine-tuned
     core) caches the transformed input images. The returned ``train_feat``/``test_feat`` are that
-    cached input (feature maps or images); :meth:`TrainableTwin.forward` consumes either.
+    cached input (feature maps or images); :meth:`TrainableTwin.forward` consumes either. ``rewrite``
+    forces the cache to be recomputed (e.g. after a transform change); the multi-GPU pool rebuilds the
+    cache once up front and leaves this at the default so members reuse it.
     """
     sessions = load_sessions(config.area)
     train_ids, train_resp, _ = build_response_matrix(sessions, "train")
     test_ids, test_resp, _ = build_response_matrix(sessions, "test")
     if config.cache_kind == "images":
-        train_feat = load_features(cache_images(config, train_ids, "train"))
-        test_feat = load_features(cache_images(config, test_ids, "test"))
+        train_feat = load_features(cache_images(config, train_ids, "train", rewrite=rewrite),
+                                   log=log, desc="load train images")
+        test_feat = load_features(cache_images(config, test_ids, "test", rewrite=rewrite),
+                                  log=log, desc="load test images")
     else:
-        train_feat = load_features(extract_features(config, train_ids, "train", device=device))
-        test_feat = load_features(extract_features(config, test_ids, "test", device=device))
+        train_feat = load_features(extract_features(config, train_ids, "train", device=device, rewrite=rewrite),
+                                   log=log, desc="load train features")
+        test_feat = load_features(extract_features(config, test_ids, "test", device=device, rewrite=rewrite),
+                                  log=log, desc="load test features")
     return dict(sessions=sessions, train_ids=train_ids, train_resp=train_resp,
                 test_ids=test_ids, test_resp=test_resp, train_feat=train_feat, test_feat=test_feat)
 
 
 def _member_path(config, seed):
-    return os.path.join(config.trained_dir, f"{config.area}_{config.backbone}_{seed}.pth.tar")
+    return os.path.join(config.trained_dir, f"member_{seed}.pth.tar")
 
 
 def _save_ensemble_correlations(config, ens_preds, recorded_avg, log):
@@ -425,19 +431,22 @@ def _save_ensemble_correlations(config, ens_preds, recorded_avg, log):
     return corr
 
 
-def train_member(config, seed, device=None, log_path=None):
+def train_member(config, seed, device=None, log_path=None, rewrite=False):
     """Train and save ONE ensemble member (used by the multi-GPU pool; also runnable standalone).
 
     Extracts features (idempotent) and trains the head for ``seed`` on them; writes
-    ``{area}_{backbone}_{seed}.pth.tar``. Does NOT write correlations.npy — call
-    :func:`aggregate_ensemble` once all members exist.
+    ``member_{seed}.pth.tar`` under ``trained_dir``. Does NOT write correlations.npy — call
+    :func:`aggregate_ensemble` once all members exist. ``rewrite`` forces the input cache to be
+    recomputed; the pool passes it only to its up-front cache step, not to the per-member workers.
     """
     device = device or (config.device if torch.cuda.is_available() else "cpu")
     if log_path is None and config.logs_dir:
         log_path = os.path.join(config.logs_dir, config.area, config.backbone, f"seed{seed}.log")
     log = _Log(log_path)
     try:
-        d = _load_training_data(config, device)
+        log(f"  seed {seed}: loading cached input into RAM ...")
+        d = _load_training_data(config, device, rewrite=rewrite, log=log)
+        log(f"  seed {seed}: loaded train {tuple(d['train_feat'].shape)} test {tuple(d['test_feat'].shape)}; training ...")
         tr_idx, va_idx = split_train_val(d["train_ids"], config.val_fraction, seed)
         twin, best_val, test_corr, _ = _train_one(
             config, seed, d["train_feat"], d["train_resp"], tr_idx, va_idx,
@@ -471,19 +480,20 @@ def aggregate_ensemble(config, device=None, log_path=None):
         log.close()
 
 
-def train_ensemble(config, seeds=(1, 2, 3, 4, 5), device=None, log_path=None):
+def train_ensemble(config, seeds=(1, 2, 3, 4, 5), device=None, log_path=None, rewrite=False):
     """Train a 5-member ensemble sequentially and save it to ``TRAINED_MODELS_DIR``.
 
     Extracts the frozen-core features once, trains each member's head on them (writing
-    ``{area}_{backbone}_{seed}.pth.tar``), then writes the ensemble ``correlations.npy`` and the
+    ``member_{seed}.pth.tar``), then writes the ensemble ``correlations.npy`` and the
     shared ``mask.npy``. For multi-GPU, use :func:`train_member` per process + :func:`aggregate_ensemble`.
+    ``rewrite`` forces the shared input cache to be recomputed once before training.
     """
     device = device or (config.device if torch.cuda.is_available() else "cpu")
     if log_path is None and config.logs_dir:
         log_path = os.path.join(config.logs_dir, config.area, config.backbone, "train.log")
     log = _Log(log_path)
     try:
-        d = _load_training_data(config, device)
+        d = _load_training_data(config, device, rewrite=rewrite, log=log)
         oracle_med = float(np.nanmedian(compute_oracle_correlation(d["sessions"])))
         ensure_dir(config.trained_dir)
         log(f"train {config.area}/{config.backbone}: {config.n_neurons} neurons, "
