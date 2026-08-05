@@ -1,16 +1,25 @@
-"""Evaluate a trained twin ensemble on the recorded V4 test set.
+"""Evaluate a trained twin ensemble on its area's recorded test set.
 
 Reports per-neuron **single-trial** correlation and **correlation-to-average**, using exactly the
 verified procedure of ``figures/make_fig_accuracy.py`` (Fig 1c): the ensemble predicts recorded
-responses to the actual stimuli with learned readout positions (``centered=False``) and the training
-transform, then both metrics follow nnvision's centered-Pearson convention
-(``get_correlations`` / ``get_avg_correlations``). Results are compared to the staged ResNet
+responses to the actual stimuli with learned readout positions (``centered=False``) and the twin's
+training transform, then both metrics follow nnvision's centered-Pearson convention
+(``get_correlations`` / ``get_avg_correlations``). Results are compared to that area's staged
 ``correlations.npy`` (and, when evaluating the staged release itself, reproduce it at r ~ 0.9997).
+
+The transform comes from :func:`dualneuron.training.dataset.training_transform`, the same call the
+feature/image caching uses, so evaluation cannot diverge from training. That matters per area: V4's
+training crop equals its screening crop (200), but V1's do not (train 93 on the 233x233 stimulus vs
+screening 167), so building the transform from ``crop_size`` would silently mis-crop V1.
+
+Only *trainable* twins are evaluated here (the :mod:`dualneuron.training.config` backbones); a
+staged release is evaluated through ``figures.make_fig_accuracy``, which resolves any twin from the
+registry.
 
     # evaluate a trained ensemble
     python -m dualneuron.training.eval_ensemble --area v4 --backbone dino \
         --weights_dir $TRAINED_MODELS_DIR/v4/dino
-    # sanity-check the evaluator against the staged ResNet release (weights_dir omitted)
+    # sanity-check the evaluator against the staged release (weights_dir omitted)
     python -m dualneuron.training.eval_ensemble --area v4 --backbone resnet
 """
 
@@ -28,16 +37,14 @@ from dotenv import load_dotenv
 
 import dualneuron
 from dualneuron.utils import ensure_dir
+from dualneuron.twins import registry
 from dualneuron.twins.nets import load_model
 from dualneuron.data.recordings import load_sessions, build_response_matrix, SKIP_BINS
-from dualneuron.training.config import TrainConfig
-from dualneuron.training.dataset import make_image_transform
+from dualneuron.training.config import AREAS, BACKBONES, TrainConfig
+from dualneuron.training.dataset import training_transform
 
 load_dotenv()
 
-# (area, backbone) -> load_model architecture string.
-_ARCH = {("v4", "resnet"): "v4", ("v4", "dino"): "v4_dino",
-         ("v1", "convnext"): "v1", ("v1", "dino"): "v1_dino"}
 # Staged twin folder per area, whose correlations.npy is the reference for the sanity comparison.
 _STAGED_FOLDER = {"v4": "V4ColorTaskDriven", "v1": "V1GrayTaskDriven"}
 THRESHOLD = 0.4
@@ -99,9 +106,11 @@ def single_trial_correlation(preds, sessions, test_ids, area):
 @torch.no_grad()
 def predict(config, weights_dir, test_ids, device, batch_size=64):
     """Ensemble predictions for the test images (full forward, ``centered=False``, eval transform)."""
-    arch = _ARCH[(config.area, config.backbone)]
-    tf = make_image_transform(config.input_size, config.img_mean, config.img_std,
-                              config.crop_size, config.channels)
+    arch = registry.resolve(config.area, config.backbone).arch
+    # The twin's own training transform (registry geometry: optional upsample -> train_crop -> resize
+    # -> z-score). Never rebuild it from crop_size: that is the SCREENING crop and differs from the
+    # training crop for V1 (167 vs 93).
+    tf = training_transform(config.area, config.backbone)
     mode = "RGB" if config.channels == 3 else "L"
     model = load_model(architecture=arch, ensemble=True, centered=False,
                        weights_dir=weights_dir, device=device).eval()
@@ -117,9 +126,10 @@ def predict(config, weights_dir, test_ids, device, batch_size=64):
 
 
 def main():
-    p = argparse.ArgumentParser(description="Evaluate a trained twin ensemble on the V4 test set")
-    p.add_argument("--area", default="v4", choices=["v4", "v1"])
-    p.add_argument("--backbone", default="resnet", choices=["resnet", "dino", "convnext"])
+    p = argparse.ArgumentParser(description="Evaluate a trained twin ensemble on its area's test set")
+    p.add_argument("--area", default="v4", choices=AREAS)
+    p.add_argument("--backbone", default="resnet", choices=BACKBONES,
+                   help="trainable backbone; a staged release is evaluated via figures.make_fig_accuracy")
     p.add_argument("--weights_dir", default=None,
                    help="Trained ensemble dir; omit to evaluate the GitHub-staged release.")
     p.add_argument("--device", default=None)

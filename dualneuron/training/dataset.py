@@ -61,10 +61,14 @@ def make_image_transform(input_size: int = 224, img_mean: float = 113.5,
         input_size: Square model input side (224 DINOv3, 100 V4 ResNet, 93 V1 ConvNeXt).
         img_mean: Pixel mean (single value applied to all channels).
         img_std: Pixel std (single value applied to all channels).
-        crop_size: Center-crop side (200 for V4's 236x420 frame; 280 for V1 after the 420 upsample).
+        crop_size: Center-crop side, in the units of the stored stimulus: 200 of V4's 236x420 frame;
+            93 of V1's 233x233 frame (= 233 - 2*70, the nnvision dataset config's ``crop: 70`` per
+            side). The two are the same visual extent -- V1's stimulus is a 420x420 field stored at
+            233x233 (scale 233/420), so its 93 crop is 167 native px, the V1 screening ``crop_size``.
         channels: 1 (grayscale V1) or 3 (color V4); sets the normalize vector length.
-        upsample_size: If set, bicubic-resize the frame to this square side BEFORE the center-crop
-            (V1's 233 -> 420 -> crop 280 -> 93 stimulus pipeline). None -> no pre-crop upsample (V4).
+        upsample_size: If set, bicubic-resize the frame to this square side BEFORE the center-crop.
+            No registered twin uses it -- both areas crop the stored stimulus directly -- so it is
+            None for every entry in the registry.
     """
     steps = []
     if upsample_size is not None:

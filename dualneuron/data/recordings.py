@@ -25,10 +25,12 @@ import numpy as np
 from dualneuron.utils import env_dir
 
 # Per-area session order: loading sessions in this order makes the concatenated per-neuron index
-# match that area's shipped correlations.npy. V4 is verified at full-set reproduction r = 0.998 (it
-# equals session-id order except for four subject-34 color_render sessions interleaved as below).
-# The V1 order is still to be determined (via the correlations alignment check); until it is set,
-# V1 sessions load in filename order (the empty list is a no-op ranking).
+# match that area's shipped correlations.npy. Neither list is sorted by session id -- both carry the
+# interleavings of the original nnvision dataset config, which is what fixes the neuron index.
+# V4 is verified at full-set reproduction r = 0.998 (it equals session-id order except for four
+# subject-34 color_render sessions interleaved as below). V1 is taken verbatim from the
+# ``CSRF19_V1`` dataset config's ``neuronal_data_files`` order used to train the ConvNeXt twin
+# (32 sessions -> 458 units, matching the registry's n_neurons).
 SESSION_ORDER = {
     "v4": [
         3763128562108, 3764337848582, 3764941778638, 3765547012994, 3765976554128,
@@ -83,8 +85,8 @@ def trials_dir(area: str = "v4", path: str = None) -> str:
 def load_sessions(area: str = "v4", path: str = None) -> List[dict]:
     """Load an area's session pickles, ordered by :data:`SESSION_ORDER` for that area.
 
-    Sessions whose id is not listed in the area's order (e.g. all of V1 until its order is set) are
-    kept in filename order.
+    Both areas' orders are complete, so every session is ranked. Any session id not listed in its
+    area's order would sort after the ranked ones, in filename order.
 
     Args:
         area: ``"v4"`` or ``"v1"``.

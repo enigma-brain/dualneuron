@@ -56,7 +56,7 @@ class TwinSpec:
     # upsample, then a center-crop, then resize to input_size. Distinct from crop_size, which is the
     # SCREENING RF crop -- screening never reads these. Defaults reproduce the plain V4 crop.
     train_crop: Optional[int] = None       # center-crop side for training (None -> use crop_size)
-    train_upsample: Optional[int] = None   # pre-crop upsample side (V1 stimulus: 420); None -> off
+    train_upsample: Optional[int] = None   # optional pre-crop upsample side; None (all twins) -> off
 
 
 # The twin catalog. Per area we have our trained backbone twin (v4 resnet / v1 convnext), the shipped
@@ -80,7 +80,10 @@ TWINS = {
     ("v4", "data_driven"): TwinSpec("v4", "data_driven", "v4_data_driven", 100, 200, 3, 113.5, 59.58,
                                     394, 40.0, "fourier", 40.0, (-1.9, 2.3), "V4ColorDataDriven"),
     # v1: our trained convnext + the shipped staged twin (V1GrayTaskDriven, read-only) + our trained
-    # dino. V1 stimulus transform = center-crop 93 (dino upsamples the 93 crop to its 224 input).
+    # dino. V1 stimulus transform = center-crop 93 of the stored 233x233 frame (= 233 - 2*70, the
+    # nnvision config's crop: 70 per side); dino upsamples that 93 crop to its 224 input. The 93 crop
+    # and the 167 screening crop are the same visual extent (the 233x233 frame stores a 420x420
+    # field, so 93/(233/420) = 167).
     ("v1", "convnext"): TwinSpec("v1", "convnext", "v1", 93, 167, 1, 124.54466, 70.28, 458,
                                  12.0, "pixel", 12.0, (-1.77, 1.86), None, train_crop=93),
     ("v1", "staged"):   TwinSpec("v1", "staged", "v1", 93, 167, 1, 124.54466, 70.28, 458,
