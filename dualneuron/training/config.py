@@ -37,24 +37,26 @@ load_dotenv()
 #   elu_offset  output nonlinearity is ELU(x + elu_offset) + 1 (matches nnvision EncoderShifter).
 #   gamma_readout  weight of the readout L1 term (gamma * mean|readout features|); V4=3.0 (verified),
 #               V1=10.0. Overridable per run via --gamma_readout.
+#   batch_size  training batch size (and the default for feature/image caching); V4=64, V1=128 --
+#               each area's original nnvision dataset config. Overridable per run via --batch_size.
 TWIN_SPECS = {
     ("v4", "resnet"):   dict(kind="nnvision", fine_tune=False,
                              model_name="resnet50_l2_eps0_1", layer_name="layer3.0",
                              feature_dim=None, spatial_size=None, block=None, readout_type=None,
-                             readout_nonlin="relu", elu_offset=-1, gamma_readout=3.0),
+                             readout_nonlin="relu", elu_offset=-1, gamma_readout=3.0, batch_size=64),
     ("v4", "dino"):     dict(kind="dino", fine_tune=False,
                              model_name="dinov3_vitb16", layer_name=None,
                              feature_dim=768, spatial_size=14, block=4, readout_type="fullgaussian2d",
-                             readout_nonlin="gelu", elu_offset=-1, gamma_readout=3.0),
+                             readout_nonlin="gelu", elu_offset=-1, gamma_readout=3.0, batch_size=64),
     ("v1", "convnext"): dict(kind="nnvision", fine_tune=True,
                              model_name="facebook/convnextv2-atto-1k-224",
                              layer_name="convnextv2.encoder.stages.1.layers.0",
                              feature_dim=None, spatial_size=None, block=None, readout_type=None,
-                             readout_nonlin="gelu", elu_offset=-1, gamma_readout=10.0),
+                             readout_nonlin="gelu", elu_offset=-1, gamma_readout=10.0, batch_size=128),
     ("v1", "dino"):     dict(kind="dino", fine_tune=True,
                              model_name="dinov3_vitb16", layer_name=None,
                              feature_dim=768, spatial_size=14, block=1, readout_type="fullgaussian2d",
-                             readout_nonlin="gelu", elu_offset=-1, gamma_readout=10.0),
+                             readout_nonlin="gelu", elu_offset=-1, gamma_readout=10.0, batch_size=128),
 }
 
 AREAS = list(dict.fromkeys(a for (a, _) in TWIN_SPECS))
@@ -75,18 +77,22 @@ class TrainConfig:
 
     # Readout / regularization. gamma_readout None -> the per-(area,backbone) spec value.
     gamma_readout: Optional[float] = None
+    # Training batch size. None -> the per-(area,backbone) spec value (V4=64, V1=128).
+    batch_size: Optional[int] = None
     init_mu_range: float = 0.4
     init_sigma_range: float = 0.6
     val_fraction: float = 0.2
 
     # Optimization (Adam + ReduceLROnPlateau, early-stop after lr_decay_steps reductions).
-    batch_size: int = 64
     lr: float = 1e-3
     weight_decay: float = 0.0
     lr_decay_factor: float = 0.3
     lr_decay_patience: int = 5
     lr_decay_steps: int = 4
     max_epochs: int = 200
+    # NOT the train/val split seed: each ensemble member is split (and initialized) with its OWN
+    # member seed -- the 1..5 of ``--seeds``, passed straight to ``split_train_val`` in the trainer --
+    # so the members differ in both init and split. Nothing reads this field.
     seed: int = 42
 
     # System.
@@ -153,6 +159,8 @@ class TrainConfig:
             self.readout_type = spec["readout_type"]
         if self.gamma_readout is None:
             self.gamma_readout = spec["gamma_readout"]
+        if self.batch_size is None:
+            self.batch_size = spec["batch_size"]
 
         # Env-driven locations (None if the corresponding env var is unset).
         self.image_dir = _join(env_dir("EXPERIMENT_DIR"), self.area, "images")
