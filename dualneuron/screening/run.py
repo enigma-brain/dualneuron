@@ -42,7 +42,7 @@ def screen_activations(
     area,
     backbone,
     data_dir,
-    output_dir=None,
+    save=True,
     token=None,
     split='train',
     dataset="rendered",
@@ -76,8 +76,10 @@ def screen_activations(
             (area, backbone) pair resolves the twin, geometry, normalization, and RF mask via
             :mod:`dualneuron.twins.registry`.
         data_dir (str): Path to the directory containing the image dataset.
-        output_dir (str, optional): Directory to save ordered responses and indices
-            (default ANALYSIS_DIR/{area}/{backbone}). If None, returns results instead of saving.
+        save (bool): If True (default), write the results to the registry-resolved location
+            (:func:`dualneuron.twins.registry.screening_path`), which is derived from
+            (area, backbone, dataset, field, run) — the caller never chooses it. If False,
+            return the results instead of writing them.
         token (str, optional): HuggingFace token for accessing ImageNet dataset.
             Required when dataset="imagenet".
         split (str): Dataset split to use. One of 'train', 'validation', or 'test'.
@@ -109,10 +111,9 @@ def screen_activations(
             staged weights for resnet/convnext, or TRAINED_MODELS_DIR/{area}/{backbone} for dino.
         batch_size (int): Number of images per batch for processing. Default: 32.
         num_workers (int): Number of worker processes for data loading. Default: 0.
-        save_format (str): Output format when output_dir is provided. 'npz' writes the
-            files {tag}_{dataset}_ordered_responses.npz and ..._indices.npz,
-            each keyed by unit_{neuron_id}; 'npy' writes per-neuron .npy files in two
-            folders. Default: 'npz'.
+        save_format (str): Output format when ``save`` is True. 'npz' writes responses.npz and
+            indices.npz, each keyed by unit_{neuron_id}; 'npy' writes per-neuron .npy files in
+            two folders. Default: 'npz'.
         device (str): Device to run computations on ('cuda' or 'cpu'). Default: 'cuda'.
         log_path (str, optional): If provided, path to a progress log file. Its parent
             folder is created on demand, and a one-line header and footer bracket a
@@ -123,21 +124,22 @@ def screen_activations(
             batch. Default: 30.0.
 
     Returns:
-        If output_dir is None:
+        If save is False:
             tuple: (sorted_responses, sorted_indices)
                 - sorted_responses (np.ndarray): Shape (num_images, num_neurons).
                   Activation values sorted in ascending order for each neuron.
                 - sorted_indices (np.ndarray): Shape (num_images, num_neurons).
                   Dataset indices corresponding to sorted responses.
-        
-        If output_dir is provided:
-            None: Results are saved to disk. With save_format='npz' (default):
-                - {output_dir}/{tag}_{dataset}_ordered_responses.npz
-                - {output_dir}/{tag}_{dataset}_ordered_indices.npz
+
+        If save is True (default):
+            None: Results are written under ANALYSIS_DIR/{area}/{backbone}/{dataset}/screening/
+            {field}/ (a per-member run nests under member{i}/). With save_format='npz' (default):
+                - responses.npz
+                - indices.npz
               both keyed by unit_{neuron_id}, each a per-neuron array sorted ascending.
               With save_format='npy', per-neuron .npy files are written instead:
-                - {output_dir}/{tag}_{layer}_{dataset}_ordered_responses/{neuron_id}.npy
-                - {output_dir}/{tag}_{layer}_{dataset}_ordered_indices/{neuron_id}.npy
+                - responses/{neuron_id}.npy
+                - indices/{neuron_id}.npy
 
     Notes:
         - Images are preprocessed with center cropping, resizing, normalization,
@@ -156,7 +158,7 @@ def screen_activations(
     tag = _run_tag(ensemble, member)
 
     # --rewrite gate (npz): skip the whole screen if both outputs exist and we're not rewriting.
-    if output_dir is not None and save_format == "npz":
+    if save and save_format == "npz":
         _rp = registry.screening_path(area, backbone, dataset, "responses", field=field, run=tag)
         _ip = registry.screening_path(area, backbone, dataset, "indices", field=field, run=tag)
         if not should_compute(_rp, rewrite) and not should_compute(_ip, rewrite):
@@ -316,7 +318,7 @@ def screen_activations(
             log_file.flush()
             log_file.close()
 
-    if output_dir is None:
+    if not save:
         _finish(" (returned, not saved)")
         return sresps, sidx
 
@@ -361,7 +363,7 @@ if __name__ == "__main__":
     parser.add_argument("--backbone", type=str, required=True, choices=registry.BACKBONES, help="twin backbone")
     parser.add_argument("--weights_dir", type=str, default=None, help="trained-ensemble dir (default: staged for resnet/convnext; TRAINED_MODELS_DIR/{area}/{backbone} for dino)")
     parser.add_argument("--data_dir", type=str, default=None, help="Image source (default RENDERED_DIR for rendered, IMAGENET_CACHE_DIR for imagenet)")
-    parser.add_argument("--output_dir", type=str, default=None, help="Where ordered responses/indices are saved (default ANALYSIS_DIR/{area}/{backbone})")
+    parser.add_argument("--no_save", action="store_true", help="compute and discard instead of writing (the write location is registry-resolved, never chosen by the caller)")
     parser.add_argument("--token", type=str, default=TOKEN, help="Huggingface token for imagenet")
     parser.add_argument("--split", type=str, default="train", help="train, validation, or test")
     parser.add_argument("--dataset", type=str, default="imagenet", help="rendered or imagenet")
@@ -385,15 +387,14 @@ if __name__ == "__main__":
     args = parser.parse_args()
     registry.check_pair(args.area, args.backbone, parser)
 
-    # Default output location: ANALYSIS_DIR/{area}/{backbone}, created on demand.
-    output_dir = args.output_dir
-    if output_dir is None:
-        if ANALYSIS_DIR is None:
-            raise ValueError(
-                "ANALYSIS_DIR is not set. Set it in .env (e.g. "
-                "ANALYSIS_DIR=${DATA_DIR}/DUAL-FEATURE-ANALYSIS) or pass --output_dir."
-            )
-        output_dir = registry.analysis_dir(args.area, args.backbone)
+    # Output location is registry-resolved (ANALYSIS_DIR/{area}/{backbone}/{dataset}/screening/
+    # {field}/), created on demand — so the twin, not the caller, decides where its results land.
+    save = not args.no_save
+    if save and ANALYSIS_DIR is None:
+        raise ValueError(
+            "ANALYSIS_DIR is not set. Set it in .env (e.g. "
+            "ANALYSIS_DIR=${DATA_DIR}/DUAL-FEATURE-ANALYSIS) or pass --no_save."
+        )
 
     # Default image source by dataset (RENDERED_DIR / IMAGENET_CACHE_DIR).
     data_dir = args.data_dir
@@ -415,7 +416,7 @@ if __name__ == "__main__":
         area=args.area,
         backbone=args.backbone,
         data_dir=data_dir,
-        output_dir=output_dir,
+        save=save,
         token=args.token,
         split=args.split,
         dataset=args.dataset,

@@ -210,7 +210,11 @@ Fig 2 (skewness) and Fig 10 (population) also consume the screening output.
 2. **Mask** (`synthesis/mask.py`). Each twin's RF mask is the **mean alpha over its MEIs/LEIs**,
    thresholded (~77.5th pct) and Gaussian-softened. Written to the **non-staged**
    `ANALYSIS_DIR/{area}/{backbone}/mask.npy` (for a shipped twin it reproduces the staged mask, reported
-   as a QC comparison — the staged mask is never overwritten).
+   as a QC comparison — the staged mask is never overwritten). Readers (screening, DreamSim,
+   neuron-strips) resolve the mask through `registry.mask_path`, which prefers the regenerated `axis`
+   mask, then the regenerated `free` one, then the twin's shipped `twins/<folder>/mask.npy`. So a
+   shipped twin can be screened before its own MEIs exist, and its regenerated mask silently takes over
+   the moment it is built. A trained twin has no shipped mask, so it must run synthesis + mask first.
 3. **Screening** (`screening/run.py`). Two regimes:
    - **`--field masked`** (default): each image is RF-masked (bg 0) and ℓ2-normed, run through the twin,
      sorted per neuron → MAIs/LAIs. This is the paper's MAI/LAI regime.

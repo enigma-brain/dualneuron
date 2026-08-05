@@ -254,15 +254,38 @@ def weights_dir(area: str, backbone: str) -> Optional[str]:
 
 
 def mask_path(area: str, backbone: str, variant: str = "axis") -> Optional[str]:
-    """Authoritative RF mask to READ: ``.../synthesis/{variant}/mask.npy`` (default the ``axis``
-    variant -- the better RF estimate), falling back to ``free`` if the axis mask is not present yet.
-    Screening / DreamSim / neuron-strips read this."""
+    """Authoritative RF mask to READ, in precedence order: the regenerated
+    ``.../synthesis/{variant}/mask.npy`` (default the ``axis`` variant -- the better RF estimate), then
+    the regenerated ``free`` mask, then this twin's shipped ``twins/<staged_folder>/mask.npy``.
+    Screening / DreamSim / neuron-strips read this.
+
+    A regenerated mask always wins, so a staged twin's shipped mask serves only until that twin's own
+    MEIs/LEIs exist and :mod:`dualneuron.synthesis.mask` has rebuilt one -- it then retires itself with
+    no bookkeeping. A twin with no ``staged_folder`` (a trained one) has no shipped mask to fall back
+    to, so it must regenerate its own; the returned path is then the canonical ``variant`` location,
+    which does not exist yet, and the caller's ``np.load`` fails there pointing at it.
+    """
     p = regenerated_mask_path(area, backbone, variant)
-    if variant == "axis" and p is not None and not os.path.exists(p):
+    if p is not None and os.path.exists(p):
+        return p
+    if variant == "axis":
         free = regenerated_mask_path(area, backbone, "free")
         if free is not None and os.path.exists(free):
             return free
+    staged = staged_mask_path(area, backbone)
+    if staged is not None and os.path.exists(staged):
+        return staged
     return p
+
+
+def staged_mask_path(area: str, backbone: str) -> Optional[str]:
+    """This twin's shipped read-only RF mask, ``twins/<staged_folder>/mask.npy``, or ``None`` for a
+    twin produced only by training (no ``staged_folder``). Read-only: :mod:`dualneuron.synthesis.mask`
+    writes to :func:`regenerated_mask_path`, never here."""
+    spec = resolve(area, backbone)
+    if spec.staged_folder is None:
+        return None
+    return os.path.join(_TWINS_DIR, spec.staged_folder, "mask.npy")
 
 
 def regenerated_mask_path(area: str, backbone: str, variant: str = "axis") -> Optional[str]:
