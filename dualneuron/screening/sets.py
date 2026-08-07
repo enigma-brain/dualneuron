@@ -15,6 +15,8 @@ load_dotenv()
 
 from datasets import load_dataset
 
+from dualneuron.synthesis.ops import change_norm
+
 
 class MaskTransform:
     """Custom transform for applying a mask to a tensor"""
@@ -128,11 +130,21 @@ class CropToMask:
     
 
 class NormTransform:
-    """Custom transform for normalizing a tensor"""
-    def __init__(self, norm):
+    """Rescale a tensor to a target L2 norm.
+
+    ``values_range`` (optional) bounds the result as well: a plain rescale is a scalar multiply, so
+    it can carry values outside the range the model was trained on whenever it scales up. Passing
+    the range defers to :func:`dualneuron.synthesis.ops.change_norm`, which satisfies the norm and
+    the bounds together -- the same primitive synthesis uses, so the two cannot drift apart. ``None``
+    (the default) keeps the plain rescale, which is what screening has always done.
+    """
+    def __init__(self, norm, values_range=None):
         self.norm = norm
-        
+        self.values_range = values_range
+
     def __call__(self, tensor):
+        if self.values_range is not None:
+            return change_norm(tensor, self.norm, self.values_range)
         current_norm = torch.norm(tensor.view(-1))
         tensor = tensor * self.norm / (current_norm + 1e-8)
         return tensor

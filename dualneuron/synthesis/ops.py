@@ -298,27 +298,115 @@ def add_noise(image, noise_level):
     return noisy
 
 
-def change_norm(image, target_norm):
+def _norm_in_range(flat, target_norm, l, h, iters=60):
+    """
+    Scale-and-clip rows of ``flat`` so each has L2 norm ``target_norm`` AND lies in ``[l, h]``.
+
+    Solves, per row, for the single scalar ``a`` with ``|| clamp(a * x, l, h) ||_2 = target_norm``.
+    That ``a`` exists and is found reliably: define ``f(a) = || clamp(a*x, l, h) ||_2``. Each element's
+    clipped magnitude is non-decreasing in ``a`` and saturates, so ``f`` is continuous and monotone
+    non-decreasing with ``f(0) = 0`` and ``f(inf) = || saturate(x) ||_2``. The intermediate value
+    theorem gives existence for any target in that span, and monotonicity makes bisection converge.
+
+    **Rows the box does not bind take a closed-form path** (``a = target_norm / ||x||``, the plain
+    rescale) and are returned from it. That is not only cheaper: the closed form is differentiable
+    *through the norm*, so those rows keep the exact value **and gradient** the unconstrained rescale
+    would have produced. Only binding rows go through the bisection, where ``a`` is a constant and
+    gradient reaches the caller through the scale-and-clip (zero on saturated elements, which cannot
+    move anyway). So adding a range changes the optimization only where the range actually binds.
+
+    Args:
+        flat (torch.Tensor): ``(N, D)`` rows to project.
+        target_norm (float): Desired L2 norm per row.
+        l, h (float): Inclusive value bounds.
+        iters (int): Bisection steps. Default: 60 (far beyond float32 precision).
+
+    Returns:
+        torch.Tensor: ``(N, D)`` rows, clipped to ``[l, h]`` with L2 norm ``target_norm``.
+
+    Raises:
+        ValueError: If a row cannot reach ``target_norm`` inside the box -- i.e. the target exceeds
+            ``|| saturate(x) ||_2``, the most energy that row can hold without leaving the range.
+    """
+    eps = 1e-8
+    # Closed form first: the plain rescale, which is the solution whenever it already lands in the
+    # box. Keeping it as an explicit branch matters for more than speed -- it is differentiable
+    # *through the norm*, so rows the box does not bind keep exactly the gradient (and the value) the
+    # unconstrained rescale would have given. The constraint then changes the optimization only when
+    # it genuinely binds, instead of silently altering every step.
+    alpha0 = target_norm / (torch.linalg.vector_norm(flat, dim=1, keepdim=True) + eps)
+    plain = flat * alpha0
+    with torch.no_grad():
+        binds = ((plain < l) | (plain > h)).any(dim=1, keepdim=True)
+    if not bool(binds.any()):
+        return plain
+
+    # Binding rows: solve || clamp(a * x, l, h) ||_2 = target_norm for `a`. The root-find is not part
+    # of the model, so it runs under no_grad and `a` is a constant; gradient reaches the caller
+    # through the scale-and-clip below (and is zero on saturated elements, which genuinely cannot move).
+    with torch.no_grad():
+        # Most energy each row can hold in-range: every element pushed to its own bound.
+        sat = torch.zeros_like(flat)
+        sat[flat > 0] = h
+        sat[flat < 0] = l
+        reach = torch.linalg.vector_norm(sat, dim=1, keepdim=True)
+        if bool((binds & (reach < target_norm)).any()):
+            worst = float(reach[binds].min())
+            raise ValueError(
+                f"target_norm={target_norm} is unreachable inside values_range=({l}, {h}): the most "
+                f"a row can hold in-range is {worst:.2f}. Lower the norm or widen the range.")
+
+        def f(a):
+            return torch.linalg.vector_norm((flat * a).clamp(l, h), dim=1, keepdim=True)
+
+        lo = torch.zeros_like(alpha0)
+        hi = torch.ones_like(alpha0)
+        for _ in range(iters):                  # grow hi until it brackets the target
+            short = f(hi) < target_norm
+            if not bool(short.any()):
+                break
+            hi = torch.where(short, hi * 2.0, hi)
+        for _ in range(iters):                  # bisect
+            mid = 0.5 * (lo + hi)
+            over = f(mid) > target_norm
+            hi = torch.where(over, mid, hi)
+            lo = torch.where(over, lo, mid)
+        alpha = 0.5 * (lo + hi)
+
+    return torch.where(binds, (flat * alpha).clamp(l, h), plain)
+
+
+def change_norm(image, target_norm, values_range=None):
     """
     Rescale image(s) to have a specific L2 norm.
-    
+
     Useful for controlling the overall magnitude of synthesized images
     to match the statistics of training data.
-    
+
     Args:
         image (torch.Tensor): Input image, shape (C, H, W) or (N, C, H, W).
         target_norm (float or None): Desired L2 norm. If None, returns
             the image unchanged.
-    
+        values_range (tuple, optional): ``(min, max)`` the result must also respect. A plain rescale
+            is a scalar multiply, so it silently voids any range constraint applied beforehand (e.g.
+            by :func:`~dualneuron.synthesis.ascend.precondition`); pass the range here and the norm
+            and the bounds are satisfied together instead of one overwriting the other. ``None``
+            (default) keeps the original scale-only behaviour.
+
     Returns:
-        torch.Tensor: Rescaled image with L2 norm ≈ target_norm.
-    
+        torch.Tensor: Rescaled image with L2 norm ≈ target_norm, and within ``values_range``
+            when one is given.
+
     Note:
         For batched inputs (4D), each image in the batch is independently
         rescaled to have the target norm.
     """
     if target_norm is None:
         return image
+    if values_range is not None:
+        l, h = values_range
+        flat = image.reshape(1, -1) if image.ndim == 3 else image.reshape(image.shape[0], -1)
+        return _norm_in_range(flat, float(target_norm), float(l), float(h)).reshape(image.shape)
     eps = 1e-8
     if image.ndim == 3:
         current = torch.norm(image.reshape(-1)) + eps

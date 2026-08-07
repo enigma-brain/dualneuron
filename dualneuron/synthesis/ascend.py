@@ -178,6 +178,7 @@ def optimization_step(
     population_std=None,
     population_support=None,
     axis_only=False,
+    values_range=None,
 ):
     """
     Perform one optimization step for activation maximization.
@@ -226,7 +227,9 @@ def optimization_step(
     
     processed = add_noise(processed, noise_level)
     if target_norm is not None:
-        processed = change_norm(processed, target_norm)
+        # values_range keeps the rescale from pushing the crops the model sees outside the value
+        # range it was trained on; None reproduces the plain rescale.
+        processed = change_norm(processed, target_norm, values_range)
 
     # One twin forward: read the target activation from the full population when in population mode
     # (so the axis term below is free), else the plain scalar objective.
@@ -397,7 +400,7 @@ def fourier_ascending(
                 )
                 
                 if target_norm is not None:
-                    init_image = change_norm(init_image, target_norm)
+                    init_image = change_norm(init_image, target_norm, values_range)
 
             init_image = init_image.to(device)
             init_act = _activation(objective_function, population_function, target_index, pole, init_image.unsqueeze(0)).item()
@@ -439,6 +442,7 @@ def fourier_ascending(
             img, box_size, noise,
             nb_crops, image_size, target_norm, tv_weight,
             jitter_std, oversample, reflect_pad_frac,
+            values_range=values_range,
             population_function=population_function, target_index=target_index, pole=pole,
             population_axis=population_axis,
             population_mean=population_mean, population_std=population_std,
@@ -460,7 +464,7 @@ def fourier_ascending(
             )
 
             if target_norm is not None:
-                clean_img = change_norm(clean_img, target_norm)
+                clean_img = change_norm(clean_img, target_norm, values_range)
             
             act = _activation(objective_function, population_function, target_index, pole, clean_img.unsqueeze(0)).item()
             activations.append(abs(act))
@@ -655,7 +659,7 @@ def pixel_ascending(
             if channels == 3:
                 init_img = recorrelate_colors(init_img, device)
             if target_norm is not None:
-                init_img = change_norm(init_img, target_norm)
+                init_img = change_norm(init_img, target_norm, values_range)
             init_act = _activation(objective_function, population_function, target_index, pole, init_img.unsqueeze(0)).item()
             images.append(init_img.detach().cpu())
             activations.append(abs(init_act))
@@ -693,6 +697,7 @@ def pixel_ascending(
             img, box_size, noise,
             nb_crops, image_size, target_norm, tv_weight,
             jitter_std, oversample, reflect_pad_frac,
+            values_range=values_range,
             population_function=population_function, target_index=target_index, pole=pole,
             population_axis=population_axis,
             population_mean=population_mean, population_std=population_std,
@@ -725,7 +730,7 @@ def pixel_ascending(
                 clean_img = recorrelate_colors(clean_img, device)
             
             if target_norm is not None:
-                clean_img = change_norm(clean_img, target_norm)
+                clean_img = change_norm(clean_img, target_norm, values_range)
             
             act = _activation(objective_function, population_function, target_index, pole, clean_img.unsqueeze(0)).item()
             activations.append(abs(act))

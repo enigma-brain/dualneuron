@@ -72,13 +72,13 @@ class TwinSpec:
 TWINS = {
     # v4: our trained resnet + the shipped staged twin (V4ColorTaskDriven, read-only) + our trained dino
     ("v4", "resnet"):   TwinSpec("v4", "resnet", "v4", 100, 200, 3, 113.5, 59.58, 394,
-                                 40.0, "fourier", 40.0, (-1.9, 2.3), None),
+                                 40.0, "fourier", 40.0, (-1.905, 2.375), None),
     ("v4", "staged"):   TwinSpec("v4", "staged", "v4", 100, 200, 3, 113.5, 59.58, 394,
-                                 40.0, "fourier", 40.0, (-1.9, 2.3), "V4ColorTaskDriven"),
+                                 40.0, "fourier", 40.0, (-1.905, 2.375), "V4ColorTaskDriven"),
     ("v4", "dino"):     TwinSpec("v4", "dino", "v4_dino", 224, 200, 3, 113.5, 59.58, 394,
-                                 40.0, "fourier", 40.0, (-1.9, 2.3), None),
+                                 40.0, "fourier", 40.0, (-1.905, 2.375), None),
     ("v4", "data_driven"): TwinSpec("v4", "data_driven", "v4_data_driven", 100, 200, 3, 113.5, 59.58,
-                                    394, 40.0, "fourier", 40.0, (-1.9, 2.3), "V4ColorDataDriven"),
+                                    394, 40.0, "fourier", 40.0, (-1.905, 2.375), "V4ColorDataDriven"),
     # v1: our trained convnext + the shipped staged twin (V1GrayTaskDriven, read-only) + our trained
     # dino. V1 stimulus transform = center-crop 93 of the stored 233x233 frame (= 233 - 2*70, the
     # nnvision config's crop: 70 per side); dino upsamples that 93 crop to its 224 input. The 93 crop
@@ -167,6 +167,20 @@ def rel_synthesis(variant):
     return ("synthesis", variant)
 
 
+def rel_norms(split="train"):
+    """L2-norm statistics of the twin's own recorded stimuli: ``norms/{split}``. Model-intrinsic, so
+    it sits at the twin root beside ``synthesis/`` rather than under a screening ``{dataset}/`` --
+    the distribution measured is the data the twin was FIT on, not a screening corpus."""
+    return ("norms", split)
+
+
+def rel_rf():
+    """Gradient-estimated receptive field: ``rf``. Model-intrinsic and available straight after
+    training -- unlike the synthesis mask, it needs no MEIs, which is what lets the L2 norm be
+    measured over the right support before any synthesis has run."""
+    return ("rf",)
+
+
 def log_path(area, backbone, *rel):
     """LOGS_DIR mirror; ``rel`` = stage parts ending in the .log filename, e.g.
     ``log_path(area, backbone, *rel_screening(dataset, field), "screening.log")``."""
@@ -222,6 +236,61 @@ def synthesis_neuron_path(area, backbone, neuron, variant="free"):
     """One neuron's MEI/LEI npz ``.../synthesis/{variant}/output/neuron{id:04d}.npz``."""
     d = synthesis_output_dir(area, backbone, variant)
     return os.path.join(d, f"neuron{int(neuron):04d}.npz") if d else None
+
+
+def norms_path(area, backbone, split="train"):
+    """Measured L2 norms of the recorded stimuli ``.../norms/{split}/norms.npz``.
+
+    Written by :mod:`dualneuron.screening.norms`; it is what calibrates this twin's L2 constraint
+    from its own training data instead of inheriting a literal.
+    """
+    return _art("analysis", area, backbone, *rel_norms(split), "norms.npz")
+
+
+def rf_mask_path(area, backbone):
+    """Gradient-estimated RF mask ``.../rf/mask.npy``, written by :mod:`dualneuron.synthesis.rf`.
+
+    Distinct from :func:`mask_path`: this one is estimated from the model's input gradients and
+    exists before any synthesis, so it can define the support the L2 norm is measured over.
+    :func:`mask_path` -- what screening and DreamSim read -- is unaffected by it.
+    """
+    return _art("analysis", area, backbone, *rel_rf(), "mask.npy")
+
+
+# The percentile of the RF-masked training-stimulus norms that defines a twin's L2 constraint.
+# A CHOICE, not a derived constant. Calibrated against the shipped masks, where the two established
+# values land on a consistent low single-digit percentile of their own area's distribution: V4's 40
+# at p2.56 and V1's 12 at p1.65. Against the gradient mask that ``screening.norms`` actually uses it
+# gives 38.92 for v4/staged (2.7% under 40; the masks correlate 0.9945, not 1.0). Inspect the figure
+# from ``figures.make_fig_norms`` and pass ``--percentile`` to choose differently.
+NORM_PERCENTILE = 2.56
+
+
+def _computed_norm(area, backbone, split="train"):
+    """The measured L2 constraint from ``norms.npz``, or None if it has not been computed."""
+    p = norms_path(area, backbone, split)
+    if p is None or not os.path.exists(p):
+        return None
+    return float(np.load(p)["norm"])
+
+
+def resolve_synth_norm(area, backbone, split="train"):
+    """L2 norm to constrain synthesis with: the measured value if this twin has one, else its
+    ``TwinSpec.synth_target_norm`` literal. Same precedence as :func:`mask_path` -- computed wins,
+    shipped falls back -- so a twin behaves exactly as before until its norm is measured."""
+    computed = _computed_norm(area, backbone, split)
+    return resolve(area, backbone).synth_target_norm if computed is None else computed
+
+
+def resolve_screen_norm(area, backbone, split="train"):
+    """L2 norm to rescale screened images to: the measured value if this twin has one, else its
+    ``TwinSpec.screen_norm`` literal.
+
+    Reads the SAME measured number as :func:`resolve_synth_norm`, which is what keeps MEIs and MAIs
+    at matched energy -- the property the shipped twins get from having both literals equal to 40.
+    """
+    computed = _computed_norm(area, backbone, split)
+    return resolve(area, backbone).screen_norm if computed is None else computed
 
 
 # ---------------------------------------------------------------------------
