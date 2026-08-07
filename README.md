@@ -198,15 +198,31 @@ V1 → BatchNorm→GELU) with output `ELU(x−1)+1`; loss is a NaN-masked Poisso
 
 Two tracks meet in the figures. The **model track** is one dependency chain per twin:
 
-**synthesis → mask → screening → DreamSim → similarity → figures**
+**RF → norms → synthesis → mask → screening → DreamSim → similarity → figures**
 
 The **recorded track** compares a twin's predictions to the macaque recordings (`data/recordings.py`,
 reading `EXPERIMENT_DIR/{area}`): Fig 1c accuracy and Fig 7 verification need only the twin + recordings;
 Fig 2 (skewness) and Fig 10 (population) also consume the screening output.
 
+0. **RF + norms** (`synthesis/rf.py`, `screening/norms.py`). The ℓ2 constant that bounds synthesis and
+   rescales masked screening is **measured per twin**, not inherited. `rf.py` estimates the population
+   receptive field from the twin's **input gradients** — one backward pass per neuron on the centered
+   ensemble, averaged over natural stimuli, thresholded by the same recipe as `synthesis/mask.py`. It
+   needs no MEIs, which is what breaks the circularity: the norm must be measured over the region a
+   synthesized stimulus occupies, but that region would otherwise only be known after synthesis. On
+   `v4/staged` it reproduces the shipped mask at corr **0.9945** in seconds, versus the 12–17 h the
+   alpha-derived mask costs. `norms.py` then measures ‖x·m‖₂ over the twin's recorded **training**
+   stimuli and takes `registry.NORM_PERCENTILE` (default 2.56, a choice — inspect
+   `figures/make_fig_norms.py`) as the constant. Consumers read it through
+   `registry.resolve_synth_norm` / `resolve_screen_norm`, which fall back to the `TwinSpec` literals,
+   so a twin behaves exactly as before until its norm has been measured.
 1. **Synthesis** (`synthesis/generate.py`). Gradient ascent on the **centered** ensemble produces, per
    well-predicted neuron, an MEI and an LEI (V4 in the Fourier phase domain with a natural-amplitude
-   prior; V1 in pixels), 10 seeds each, ℓ2-constrained. One npz per neuron.
+   prior; V1 in pixels), 10 seeds each, ℓ2-constrained. One npz per neuron. The ℓ2 rescale is a scalar
+   multiply, so on its own it can carry the stimulus outside the twin's `values_range`; passing that
+   range to `ops.change_norm` satisfies the norm **and** the bounds together. Rows the range does not
+   bind take a closed-form path identical in value and gradient to the plain rescale, so the constraint
+   alters the optimization only where it actually binds.
 2. **Mask** (`synthesis/mask.py`). Each twin's RF mask is the **mean alpha over its MEIs/LEIs**,
    thresholded (~77.5th pct) and Gaussian-softened. Written to the **non-staged**
    `ANALYSIS_DIR/{area}/{backbone}/mask.npy` (for a shipped twin it reproduces the staged mask, reported
@@ -255,6 +271,11 @@ model side, 6, 9, 10) use the **centered, RF-masked, ℓ2-normed** screening (`c
 Every command takes `--area --backbone`. Example for `v4/resnet`; swap in any twin:
 
 ```bash
+# RF (gradient-estimated, seconds) then the twin's own L2 constant, + the figure to choose the percentile
+python -m dualneuron.synthesis.rf          --area v4 --backbone resnet
+python -m dualneuron.screening.norms       --area v4 --backbone resnet
+python -m dualneuron.figures.make_fig_norms --area v4 --backbone resnet
+
 # Synthesis (one twin per GPU; resumable) + mask
 CUDA_VISIBLE_DEVICES=0 python -m dualneuron.synthesis.generate --area v4 --backbone resnet
 python -m dualneuron.synthesis.mask --area v4 --backbone resnet
@@ -290,21 +311,26 @@ registry — e.g. crop 200 (V4) / 167 (V1), 224px inputs for the DINO twins.
 
 ### Saved-file layout
 
+**One tree, three roots.** Every artifact lives at `{ROOT}/{area}/{backbone}/<stage…>`, where `ROOT` is
+`ANALYSIS_DIR` (data), `LOGS_DIR` (logs) or `PAPER_FIG_DIR` (figures). A stage's relative path is
+**identical under all three**, so filenames stay bare and the folder carries the identity. Dataset-scoped
+stages nest under `{dataset}/`; model-intrinsic ones (RF, norms, synthesis) sit at the twin root.
+
 ```
-ANALYSIS_DIR/{area}/{backbone}/
-├── ensemble_{rendered,imagenet}_ordered_{responses,indices}.npz         # masked screening
-├── ensemble_imagenet_fullfield_ordered_{responses,indices}.npz         # full-field screening
-├── member{i}_{dataset}_ordered_{responses,indices}.npz                  # single-member screening
-├── dreamsim_{rendered,imagenet}_embeddings.npz  +  dreamsim_imagenet_indices.npy
-├── similarity_{rendered,imagenet}.npz                                   # d′, R², controls, skewness
-├── mask.npy                                                             # this twin's regenerated RF mask
-└── synthesis/neuron{id:04d}.npz                                         # MEI/LEI: image, alpha, activation ×10
+{ROOT}/{area}/{backbone}/
+├── rf/                            mask.npy, sensitivity.npy   | rf.log
+├── norms/{split}/                 norms.npz                   | norms.log   | norms.pdf
+├── {dataset}/screening/{field}/   responses.npz, indices.npz  | screening.log
+│   └── member{i}/                 …                             (single-member run)
+├── {dataset}/dreamsim/            embeddings.npz, indices.npy, similarity.npz
+└── synthesis/{variant}/           mask.npy                    | mask.log, generate.log
+    └── output/                    neuron{id:04d}.npz            (MEI/LEI: image, alpha, activation ×seeds)
 ```
 
-Bare, folder-namespaced filenames (the `{area}/{backbone}/` folder carries the identity). Figures mirror
-this: `PAPER_FIG_DIR/{area}/{backbone}/{fig_accuracy,fig_sparsity,dreamsim_dprime_{dataset},...}.pdf`
-(`make_fig_simulated` has no twin and stays flat in `PAPER_FIG_DIR/`). Logs:
-`LOGS_DIR/{area}/{backbone}/{screening_*,synthesis,mask,dreamsim_*,similarity_*,train,...}.log`.
+`{field}` is `masked` or `full`; `{variant}` is `free` or `axis`. Paths are resolved only through
+`twins/registry.py` (`screening_path`, `norms_path`, `rf_mask_path`, `synthesis_*`, `log_path`,
+`fig_path`) — no stage picks its own output location. `make_fig_simulated` has no twin and stays flat in
+`PAPER_FIG_DIR/`.
 
 ### Equipment, concurrency, observed times
 
@@ -328,8 +354,13 @@ not the headline `memory.current`.
   space, **Figs 4-5** strips. `sparse_split`: V4 160/45, V1 312/133.
 - **Recorded track (V4):** **Fig 1c** (recomputed corr-to-avg matches `correlations.npy`, r = 0.9997,
   n > 0.4 = 207), **Fig 2** (model-vs-recorded skewness r = 0.68), **Fig 7**, **Fig 10**, **Suppl. Fig 4**.
-- **DINO twins (v4/dino, v1/dino):** trained; their synthesis/screening ℓ2 constants in the registry are
-  provisional starting points (not yet re-derived for the 224px input).
+- **L2 constants:** measured per twin rather than inherited (`synthesis/rf.py` → `screening/norms.py`,
+  read via `registry.resolve_synth_norm` / `resolve_screen_norm`, literals as fallback). Calibrated at
+  `NORM_PERCENTILE` = 2.56, where the shipped V4 value (40) and V1 value (12) fall on their own
+  RF-masked training distributions (p2.56 / p1.65). Computed so far: `v4/staged` → 38.92.
+  `values_range` now matches each twin's physical `(0-mean)/std, (255-mean)/std` exactly.
+- **DINO twins:** `v4/dino` trained (5 members); `v1/dino` has 1 of 5 — the rest were lost to a GPU
+  fault, see the incident note in the training logs. Their L2 constants have not been measured yet.
 - **To follow:** V1 recorded panels need V1's canonical `SESSION_ORDER` (in `data/recordings.py`); Fig 2e,f
   baseline firing; Fig 8 independent evaluator; Fig 11 mouse; a deliberate cross-twin comparison figure.
 
@@ -345,8 +376,10 @@ dualneuron/
 │   ├── activations.py      # activation-extraction utilities
 │   ├── V4ColorTaskDriven/, V1GrayTaskDriven/, V4GrayTaskDriven/   # shipped weights + mask.npy + correlations.npy
 │   └── V4ColorDataDriven/  # shipped weights + correlations.npy (data-driven color V4; no mask.npy)
-├── screening/run.py        # screen_activations (--field masked|full, --n_sample); sets.py, utils.py, visualize.py
-├── synthesis/              # ascend.py, generate.py, mask.py, ops.py, visualize.py, priors/
+├── screening/              # run.py (--field masked|full, --n_sample), norms.py (the twin's L2 constant
+│                           #   from its RF-masked training stimuli); sets.py, utils.py, visualize.py
+├── synthesis/              # ascend.py, generate.py, mask.py (RF from MEI alphas), rf.py (RF from input
+│                           #   gradients, no synthesis needed), ops.py, visualize.py, priors/
 ├── dream/                  # sim.py, subset.py, similarity.py, axis.py  (DreamSim analyses)
 ├── data/recordings.py      # load_sessions / build_response_matrix (per area; SESSION_ORDER aligns neurons)
 ├── training/               # config.py, dataset.py, features.py, trainer.py, run.py, eval_ensemble.py, convert_dinov3_weights.py
