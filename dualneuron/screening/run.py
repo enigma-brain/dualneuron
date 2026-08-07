@@ -179,10 +179,14 @@ def screen_activations(
     # Per-twin screening geometry + normalization, all from the central registry (single source of
     # truth). img_mean/img_std are the twin's training z-score stats (0-255 scale); norm is the L2
     # contrast target; grayscale/crop/output_size/num_channels match the twin's input. These are the
-    # established per-run constants (e.g. v4/resnet: 100px, crop 200, L2 40, 113.5/59.58; v1/convnext:
-    # 93px, crop 167, L2 12, 124.54/70.28) — screening a twin means exactly what it did before.
+    # established per-run constants (e.g. v4/resnet: 100px, crop 200, 113.5/59.58; v1/convnext: 93px,
+    # crop 167, 124.54/70.28). The L2 target is the one exception: it is resolved below, so a twin
+    # whose norm has been measured screens at that value and every other twin at its literal.
     output_size = (spec.input_size, spec.input_size)
-    norm = spec.screen_norm
+    # Measured from this twin's own training stimuli if it has been computed, else the TwinSpec
+    # literal — the same value synthesis constrains to, which is what keeps MAIs and MEIs at
+    # matched energy.
+    norm = registry.resolve_screen_norm(area, backbone)
     num_channels = spec.channels
     grayscale = spec.channels == 1
     crop_size = spec.crop_size

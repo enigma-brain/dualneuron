@@ -32,6 +32,33 @@ def env_dir(name, default=None):
     return os.path.normpath(value) if isinstance(value, str) else value
 
 
+def default_workers(cap=16):
+    """
+    DataLoader workers to default to on *this* machine.
+
+    Loading the recorded stimuli is latency-bound small-file I/O -- EXPERIMENT_DIR is often a
+    network share -- so concurrency is the lever that matters. But the right number is a property of
+    the machine, not of this repository: a hard-coded default either starves a big host or
+    oversubscribes a small one. This reads the process's actual CPU affinity, so a cgroup/cpuset
+    limit is respected (unlike os.cpu_count(), which reports the host's cores regardless), and caps
+    it so a very large host does not open an unreasonable number of concurrent readers.
+
+    Callers should keep exposing an explicit override (e.g. ``--num_workers``); this is only the
+    value used when the caller does not choose one.
+
+    Args:
+        cap: Upper bound on the returned count. Default: 16.
+
+    Returns:
+        int: Worker count in [1, cap].
+    """
+    try:
+        available = len(os.sched_getaffinity(0))      # respects cgroup/cpuset limits
+    except AttributeError:                            # not available off Linux
+        available = os.cpu_count() or 1
+    return max(1, min(cap, available))
+
+
 def ensure_dir(path):
     """
     Create a directory (and any missing parents), returning it as a Path.

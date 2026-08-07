@@ -82,10 +82,16 @@ _ASCEND_PARAMS = {"pixel": _PIXEL_PARAMS, "fourier": _FOURIER_PARAMS}
 
 def _ascend_params(spec, device):
     """Assemble the full ascent kwargs for a twin: the method's algorithm params + the twin geometry
-    (image_size, values_range, target_norm, and channels for the pixel method) from the registry."""
+    (image_size, values_range, target_norm, and channels for the pixel method) from the registry.
+
+    ``target_norm`` comes from :func:`~dualneuron.twins.registry.resolve_synth_norm` -- the value
+    measured from this twin's own training stimuli if it has been computed, else the ``TwinSpec``
+    literal. ``values_range`` is passed through to the ascent so the norm constraint and the value
+    bounds are satisfied together rather than the rescale silently voiding the range.
+    """
     params = dict(_ASCEND_PARAMS[spec.synth_method])
     params.update(image_size=spec.input_size, values_range=spec.synth_values_range,
-                  target_norm=spec.synth_target_norm, device=device)
+                  target_norm=registry.resolve_synth_norm(spec.area, spec.backbone), device=device)
     if spec.synth_method == "pixel":
         params["channels"] = spec.channels
     return params
