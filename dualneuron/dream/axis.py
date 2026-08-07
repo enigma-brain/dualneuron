@@ -4,51 +4,27 @@ import numpy as np
 from dualneuron.twins import registry
 
 
-def population_axis(area, backbone, neurons=None, k=20, dataset="imagenet",
-                    field="full", weights_dir=None, exclude_target=True, eps=1e-8):
-    """
-    Per-neuron population axis a_i = z_bar(MAI) - z_bar(LAI): the difference of the z-scored
-    population-response centroids of a neuron's most- and least-activating natural images.
+def population_context(area, backbone, neurons=None, dataset="imagenet", field="full",
+                       weights_dir=None, eps=1e-8):
+    """Everything the axes are built from, loaded ONCE.
 
-    The axis lives ONLY in the WELL-PREDICTED subspace of the population: the neurons whose training
-    correlation-to-average exceeds 0.4 for this twin (``registry.well_predicted_neurons``, from the
-    model's own ``correlations.npy``). Poorly-predicted / dead units are excluded from the space, the
-    z-score, the centroids, and (at synthesis time) the cosine -- they would otherwise contribute
-    unreliable, noise-dominated dimensions to the population-context direction.
-
-    Computed from the FULL-FIELD screening (no mask / no L2 -- the natural regime): each screened
-    image has a full population response, so for neuron i we take its top-k / bottom-k images (by i's
-    own response), z-score the support neurons' responses over the whole screened set, difference the
-    two centroids, ZERO the i-th component (so the axis carries only the surrounding population's
-    context, not the target neuron itself), and unit-normalize. This is the same construction as the
-    paper's neuron axis, reused to regularize MEI/LEI synthesis toward the natural population manifold.
-
-    The full-field ordered files store, per neuron, its responses sorted ascending and the global
-    image id at each rank; the population vectors are reconstructed by inverting those sorts.
+    Reading the screening npz and rebuilding the (image x support-neuron) matrix is the expensive
+    part; the axis itself is a couple of means over rows of it. Separating them is what makes a
+    *per-seed* axis affordable -- :func:`sampled_axis` can then be called once per (neuron, seed)
+    without touching disk again.
 
     Args:
-        area, backbone: the twin (its full-field screening must exist -- run
-            ``screening.run --field full`` first).
-        neurons: neuron ids to build axes for; default all well-predicted neurons.
-        k: number of MAIs and of LAIs per centroid. Default: 20.
-        dataset: screening dataset. Default: "imagenet".
-        field: screening regime; "full" (full-field) for the natural population axis. Default: "full".
-        weights_dir: override for the twin's ``correlations.npy`` (defining the support). Default:
-            staged / ``TRAINED_MODELS_DIR`` per the registry.
-        exclude_target: if True (default) zero the target's own component so the axis carries only the
-            surrounding population's context (the regularizer form). If False, KEEP it -- the full
-            MAI-LAI direction incl. the target (a_full), whose target component is dominant; used to
-            "fold" the drive into a single bounded cosine objective.
-        eps: numerical stabilizer.
+        area, backbone: The twin (its ``field`` screening must exist).
+        neurons: Neuron ids whose ranked image order to precompute; default the whole support.
+        dataset, field: Screening the axis is built from ("full" = the natural, unmasked regime).
+        weights_dir: Override for the twin's ``correlations.npy`` (which defines the support).
+        eps: Numerical stabilizer for the z-score.
 
     Returns:
-        dict with (P = number of well-predicted / support neurons):
-            "neurons": (n,) neuron ids the axes are built for,
-            "support": (P,) global ids of the well-predicted neurons spanning the axis space (sorted),
-            "axis":    (n, P) float32 unit axes in neuron order (row r is a_{neurons[r]} over the
-                       support, the target's own component zeroed),
-            "mean":    (P,) per-support-neuron full-field response mean (to z-score at synthesis time),
-            "std":     (P,) per-support-neuron full-field response std.
+        dict with ``zmat`` ((images, P) z-scored responses), ``support`` ((P,) global ids),
+        ``pos`` (global id -> column), ``row_ids`` ((images,) screened image ids, sorted),
+        ``orders`` ({neuron: image ids ascending by that neuron's response}), ``neurons``,
+        and the ``mean``/``std`` used for the z-score.
     """
     resp = np.load(registry.screening_path(area, backbone, dataset, "responses", field=field))
     idx = np.load(registry.screening_path(area, backbone, dataset, "indices", field=field))
@@ -68,18 +44,56 @@ def population_axis(area, backbone, neurons=None, k=20, dataset="imagenet",
     std = mat.std(0) + eps
     zmat = (mat - mean) / std
 
-    neurons = [int(n) for n in (support if neurons is None else neurons)]
-    axes = np.zeros((len(neurons), len(support)), dtype=np.float32)
-    for r, n in enumerate(neurons):
-        order = idx[f"unit_{n}"]                            # image ids for neuron n, ascending response
-        mai = np.searchsorted(row_ids, order[-k:])
-        lai = np.searchsorted(row_ids, order[:k])
-        a = zmat[mai].mean(0) - zmat[lai].mean(0)
-        if exclude_target and n in pos:
-            a[pos[n]] = 0.0                                 # exclude the target from its own axis
-        axes[r] = a / (np.linalg.norm(a) + eps)
-    return {"neurons": np.array(neurons), "support": support,
-            "axis": axes, "mean": mean, "std": std}
+    neurons = np.array([int(n) for n in (support if neurons is None else neurons)])
+    orders = {int(n): idx[f"unit_{int(n)}"] for n in neurons}
+    return {"zmat": zmat, "support": support, "pos": pos, "row_ids": row_ids,
+            "orders": orders, "neurons": neurons, "mean": mean, "std": std}
+
+
+def sampled_axis(ctx, neuron, pool=100, n_sample=15, rng=None, exclude_target=False, eps=1e-8,
+                 return_ids=False):
+    """One neuron's population axis, from a random subsample of its extreme images.
+
+    The centroids are taken over ``n_sample`` images drawn without replacement from the neuron's
+    top-``pool`` and bottom-``pool`` full-field responses, rather than over a fixed extreme set. With
+    a different ``rng`` per synthesis seed this makes the axis itself vary across seeds, so a neuron's
+    MEIs/LEIs sample the invariances of its high/low poles instead of re-deriving one fixed direction.
+
+    Args:
+        ctx: A :func:`population_context` dict.
+        neuron: Target neuron id (must be in ``ctx["orders"]``).
+        pool: Size of the extreme pool at each pole to draw from. Default: 100.
+        n_sample: Images drawn from each pool for the centroid; ``None`` (or >= ``pool``) uses the
+            whole pool, which reproduces the fixed-extreme behaviour. Default: 15.
+        rng: ``np.random.RandomState`` for the draw; ``None`` uses the global RNG.
+        exclude_target: Zero the target's own component, leaving only the surrounding population's
+            context (the regularizer form). False keeps it -- the full MAI-LAI direction used to fold
+            the drive into a single bounded cosine.
+        eps: Numerical stabilizer.
+        return_ids: Also return the drawn image ids. With a per-seed ``rng`` the axis is not
+            recoverable from the twin alone, so a caller that persists its results should record
+            them alongside.
+
+    Returns:
+        ``(P,)`` float32 unit axis over ``ctx["support"]``; with ``return_ids``, the tuple
+        ``(axis, mai_ids, lai_ids)`` where the id arrays are the drawn high/low image ids.
+    """
+    n = int(neuron)
+    order = ctx["orders"][n]                                # ascending by this neuron's response
+    hi_pool, lo_pool = order[-pool:], order[:pool]
+    if n_sample is not None and n_sample < len(hi_pool):
+        draw = (rng or np.random).choice
+        hi = draw(hi_pool, size=n_sample, replace=False)
+        lo = draw(lo_pool, size=n_sample, replace=False)
+    else:
+        hi, lo = hi_pool, lo_pool
+
+    zmat, row_ids = ctx["zmat"], ctx["row_ids"]
+    a = zmat[np.searchsorted(row_ids, hi)].mean(0) - zmat[np.searchsorted(row_ids, lo)].mean(0)
+    if exclude_target and n in ctx["pos"]:
+        a[ctx["pos"][n]] = 0.0                              # exclude the target from its own axis
+    axis = (a / (np.linalg.norm(a) + eps)).astype(np.float32)
+    return (axis, np.asarray(hi), np.asarray(lo)) if return_ids else axis
 
 
 def semantic_axis(

@@ -24,7 +24,7 @@ import torch
 
 from dualneuron.twins.nets import load_model
 from dualneuron.twins import registry
-from dualneuron.dream.axis import population_axis
+from dualneuron.dream.axis import population_context, sampled_axis
 from dualneuron.synthesis.ascend import pixel_ascending, fourier_ascending
 from dualneuron.utils import ensure_dir, env_dir, RewriteLine, should_compute
 
@@ -103,8 +103,8 @@ def _objective(model, neuron_id, weight):
 
 
 def generate(area, backbone, output_dir=None, num_seeds=10, neurons=None,
-             weights_dir=None, mode="free", axis_k=20, axis_field="full",
-             rewrite=False, device="cuda", log_path=None, log_every=30.0):
+             weights_dir=None, mode="free", axis_pool=100, axis_sample=15,
+             axis_field="full", rewrite=False, device="cuda", log_path=None, log_every=30.0):
     """
     Synthesize MEIs and LEIs for a twin's neurons, one npz per neuron.
 
@@ -129,7 +129,11 @@ def generate(area, backbone, output_dir=None, num_seeds=10, neurons=None,
             cos(z_pop, a_full) over the well-predicted subspace (target component kept) -- a single
             bounded objective that reproduces the neuron's natural MAI/LAI endpoint state. "axis" needs
             the twin's full-field screening.
-        axis_k (int): MAIs/LAIs per centroid when building the axis (mode="axis"). Default: 20.
+        axis_pool (int): Size of the extreme pool at each pole the axis centroids are drawn from
+            (mode="axis"). Default: 100.
+        axis_sample (int): Images drawn from each pool per seed to form the centroids; None uses the
+            whole pool. Drawing a fresh subsample per seed makes the axis vary across seeds, so the
+            seeds sample the pole's invariances. Default: 15.
         axis_field (str): Screening regime the axis is built from (mode="axis"). Default: "full".
         device (str): Torch device. Default: "cuda".
         log_path (str, optional): Progress-log file; a single line is rewritten in
@@ -160,12 +164,14 @@ def generate(area, backbone, output_dir=None, num_seeds=10, neurons=None,
 
     # "axis" mode folds the drive into the natural population axis a_full (target component KEPT), from
     # the full-field screening; the cosine to it is the whole objective (axis_only). "free" needs none.
-    axis_map = pop_mean = pop_std = pop_support = None
+    # The context (screening -> z-scored population matrix) is loaded once here; the axis itself is
+    # drawn per (neuron, seed) inside the loop below, so seeds sample the pole rather than sharing one
+    # fixed direction. Setting axis_sample >= axis_pool disables the subsampling.
+    axis_ctx = pop_mean = pop_std = pop_support = None
     if mode == "axis":
-        pa = population_axis(area, backbone, neurons=neurons, k=axis_k, field=axis_field,
-                             weights_dir=weights_dir, exclude_target=False)
-        axis_map = {int(n): pa["axis"][r] for r, n in enumerate(pa["neurons"])}
-        pop_mean, pop_std, pop_support = pa["mean"], pa["std"], pa["support"]
+        axis_ctx = population_context(area, backbone, neurons=neurons, field=axis_field,
+                                      weights_dir=weights_dir)
+        pop_mean, pop_std, pop_support = axis_ctx["mean"], axis_ctx["std"], axis_ctx["support"]
 
     if output_dir is None:
         if ANALYSIS_DIR is None:
@@ -221,13 +227,25 @@ def generate(area, backbone, output_dir=None, num_seeds=10, neurons=None,
         desc=f"synthesize {area}/{backbone}",
     ):
         results = {f"{pole}_{field}": [] for pole, _ in poles for field in fields}
+        axis_ids = {"axis_mai_ids": [], "axis_lai_ids": []}
         for seed in seeds:
             torch.manual_seed(seed)
             np.random.seed(seed)
+            # A fresh subsample of this neuron's extreme pools per seed, so the axis differs between
+            # seeds and the MEI/LEI pair samples the pole's invariances. The MEI and LEI of one seed
+            # share the axis -- the pole sign picks which end of it is ascended.
+            axis_vec = None
+            if mode == "axis":
+                axis_vec, mai_ids, lai_ids = sampled_axis(
+                    axis_ctx, neuron_id, pool=axis_pool, n_sample=axis_sample,
+                    rng=np.random.RandomState((neuron_id * 100003 + seed) % (2 ** 32)),
+                    exclude_target=False, return_ids=True)
+                axis_ids["axis_mai_ids"].append(mai_ids)
+                axis_ids["axis_lai_ids"].append(lai_ids)
             for pole, weight in poles:
                 if mode == "axis":
                     res = ascend(None, population_function=model, target_index=neuron_id,
-                                 pole=float(weight), population_axis=axis_map[neuron_id],
+                                 pole=float(weight), population_axis=axis_vec,
                                  population_mean=pop_mean, population_std=pop_std,
                                  population_support=pop_support, axis_only=True, **params)
                 else:
@@ -235,7 +253,12 @@ def generate(area, backbone, output_dir=None, num_seeds=10, neurons=None,
                 results[f"{pole}_image"].append(res["image"].detach().cpu().numpy())
                 results[f"{pole}_alpha"].append(res["alpha"].detach().cpu().numpy())
                 results[f"{pole}_activation"].append(float(res["activation"]))
-        meta = {} if mode == "free" else {"mode": mode}   # keep the free npz byte-identical
+        # axis mode also records the images each seed's axis was drawn from: with a per-seed rng the
+        # axis is not recoverable from the twin alone, so without these the run is not reproducible.
+        meta = {} if mode == "free" else {                 # keep the free npz byte-identical
+            "mode": mode,
+            **{k: np.stack(v) for k, v in axis_ids.items() if v},
+        }
         np.savez_compressed(
             out_file(neuron_id),
             neuron_id=neuron_id,
@@ -272,7 +295,11 @@ if __name__ == '__main__':
     parser.add_argument("--mode", type=str, default="free", choices=registry.SYNTHESIS_VARIANTS,
                         help="'free' (original activation ascent) or 'axis' (fold the drive into the "
                              "natural population axis; needs the twin's full-field screening)")
-    parser.add_argument("--axis_k", type=int, default=20, help="MAIs/LAIs per centroid for the axis (mode=axis)")
+    parser.add_argument("--axis_pool", type=int, default=100,
+                        help="extreme pool per pole the axis centroids are drawn from (mode=axis)")
+    parser.add_argument("--axis_sample", type=int, default=15,
+                        help="images drawn from each pool per SEED to form the centroids; the axis "
+                             "then varies across seeds (mode=axis)")
     parser.add_argument("--axis_field", type=str, default="full", help="screening regime for the axis")
     parser.add_argument("--rewrite", action="store_true", help="re-synthesize neurons even if their npz exists")
     parser.add_argument("--device", type=str, default="cuda", help="device to run on")
@@ -296,7 +323,8 @@ if __name__ == '__main__':
         neurons=args.neurons,
         weights_dir=args.weights_dir,
         mode=args.mode,
-        axis_k=args.axis_k,
+        axis_pool=args.axis_pool,
+        axis_sample=args.axis_sample,
         axis_field=args.axis_field,
         rewrite=args.rewrite,
         device=args.device,
