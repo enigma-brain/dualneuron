@@ -206,6 +206,24 @@ def screening_path(area, backbone, dataset, kind, field="masked", run="ensemble"
     return _art("analysis", area, backbone, *rel, f"{kind}.npz")
 
 
+def context_path(area, backbone, dataset, kind, field="full"):
+    """Cached population context for the axis machinery, beside the screening it is built from:
+    ``.../{dataset}/screening/{field}/context.npy`` (``kind="matrix"``) and ``context_meta.npz``
+    (``kind="meta"``).
+
+    The matrix is the z-scored (images x support-neuron) response matrix. It is a plain ``.npy``
+    rather than an ``.npz`` so it can be opened with ``mmap_mode``: rebuilding it means reading every
+    neuron's key out of ``responses.npz`` + ``indices.npz`` (~945 MB for a 200k screening), while the
+    cached form is ~164 MB and an axis draw touches only the rows it sampled. ``meta`` holds the
+    ``support`` ids, ``row_ids``, and the per-neuron ``mean``/``std`` the z-score used -- the same
+    statistics synthesis needs to z-score the population at each ascent step.
+    """
+    names = {"matrix": "context.npy", "meta": "context_meta.npz"}
+    if kind not in names:
+        raise ValueError(f"unknown context kind {kind!r}; expected one of {list(names)}")
+    return _art("analysis", area, backbone, *rel_screening(dataset, field), names[kind])
+
+
 def dreamsim_embeddings_path(area, backbone, dataset):
     """DreamSim embeddings ``.../{dataset}/dreamsim/embeddings.npz``."""
     return _art("analysis", area, backbone, *rel_dreamsim(dataset), "embeddings.npz")
