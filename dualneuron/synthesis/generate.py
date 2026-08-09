@@ -104,7 +104,8 @@ def _objective(model, neuron_id, weight):
 
 def generate(area, backbone, output_dir=None, num_seeds=10, neurons=None,
              weights_dir=None, mode="free", axis_pool=100, axis_sample=15,
-             axis_field="full", rewrite=False, device="cuda", log_path=None, log_every=30.0):
+             axis_dataset="imagenet", axis_field="full", rewrite=False, device="cuda",
+             log_path=None, log_every=30.0):
     """
     Synthesize MEIs and LEIs for a twin's neurons, one npz per neuron.
 
@@ -134,6 +135,11 @@ def generate(area, backbone, output_dir=None, num_seeds=10, neurons=None,
         axis_sample (int): Images drawn from each pool per seed to form the centroids; None uses the
             whole pool. Drawing a fresh subsample per seed makes the axis vary across seeds, so the
             seeds sample the pole's invariances. Default: 15.
+        axis_dataset (str): Screening corpus the axis poles are drawn from (mode="axis"):
+            "imagenet" (default) or "rendered". Both are natural-image sets the twin was screened
+            over, but they condition the axis on different image statistics, so this selects what
+            "the neuron's high/low pole" means. Recorded in the npz, because the saved
+            axis_mai_ids / axis_lai_ids index into this dataset and are ambiguous without it.
         axis_field (str): Screening regime the axis is built from (mode="axis"). Default: "full".
         device (str): Torch device. Default: "cuda".
         log_path (str, optional): Progress-log file; a single line is rewritten in
@@ -169,8 +175,8 @@ def generate(area, backbone, output_dir=None, num_seeds=10, neurons=None,
     # fixed direction. Setting axis_sample >= axis_pool disables the subsampling.
     axis_ctx = pop_mean = pop_std = pop_support = None
     if mode == "axis":
-        axis_ctx = population_context(area, backbone, neurons=neurons, field=axis_field,
-                                      weights_dir=weights_dir)
+        axis_ctx = population_context(area, backbone, neurons=neurons, dataset=axis_dataset,
+                                      field=axis_field, weights_dir=weights_dir)
         pop_mean, pop_std, pop_support = axis_ctx["mean"], axis_ctx["std"], axis_ctx["support"]
 
     if output_dir is None:
@@ -257,6 +263,9 @@ def generate(area, backbone, output_dir=None, num_seeds=10, neurons=None,
         # axis is not recoverable from the twin alone, so without these the run is not reproducible.
         meta = {} if mode == "free" else {                 # keep the free npz byte-identical
             "mode": mode,
+            # the saved ids index into this screening; without it they cannot be resolved
+            "axis_dataset": axis_dataset,
+            "axis_field": axis_field,
             **{k: np.stack(v) for k, v in axis_ids.items() if v},
         }
         np.savez_compressed(
@@ -300,6 +309,9 @@ if __name__ == '__main__':
     parser.add_argument("--axis_sample", type=int, default=15,
                         help="images drawn from each pool per SEED to form the centroids; the axis "
                              "then varies across seeds (mode=axis)")
+    parser.add_argument("--axis_dataset", type=str, default="imagenet",
+                        choices=["imagenet", "rendered"],
+                        help="screening corpus the axis poles are drawn from (mode=axis)")
     parser.add_argument("--axis_field", type=str, default="full", help="screening regime for the axis")
     parser.add_argument("--rewrite", action="store_true", help="re-synthesize neurons even if their npz exists")
     parser.add_argument("--device", type=str, default="cuda", help="device to run on")
@@ -325,6 +337,7 @@ if __name__ == '__main__':
         mode=args.mode,
         axis_pool=args.axis_pool,
         axis_sample=args.axis_sample,
+        axis_dataset=args.axis_dataset,
         axis_field=args.axis_field,
         rewrite=args.rewrite,
         device=args.device,
