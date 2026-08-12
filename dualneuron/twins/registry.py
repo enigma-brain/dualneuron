@@ -396,6 +396,30 @@ def well_predicted_neurons(area: str, backbone: str, threshold: float = 0.4,
     return np.where(corr > threshold)[0]
 
 
+def sampled_neurons(area: str, backbone: str, n: Optional[int] = None, seed: int = 0,
+                    weights_dir: Optional[str] = None) -> np.ndarray:
+    """A reproducible random subset of this twin's well-predicted neurons -- NESTED in ``n``.
+
+    The order is a fixed permutation of :func:`well_predicted_neurons` under ``seed``, and ``n`` takes
+    a prefix of it. So the subset for ``n=15`` is contained in the one for ``n=50``: synthesizing the
+    first 15 and later asking for 50 continues with 35 new neurons rather than redrawing, and the
+    producers skip whatever they have already written. ``n=None`` returns the whole set in that order.
+
+    Args:
+        area, backbone: The twin.
+        n: Size of the prefix; None (default) for all well-predicted neurons.
+        seed: RNG seed fixing the permutation, so the same ``n`` always names the same neurons.
+        weights_dir: Passed through to :func:`well_predicted_neurons`.
+
+    Returns:
+        ``(n,)`` global neuron ids, sorted ascending for stable output ordering.
+    """
+    pool = well_predicted_neurons(area, backbone, weights_dir=weights_dir)
+    order = np.random.RandomState(seed).permutation(len(pool))
+    take = len(pool) if n is None else min(int(n), len(pool))
+    return np.sort(pool[order[:take]])
+
+
 def sparse_split(area: str, backbone: str, threshold: float = 2.0,
                  responses_path: Optional[str] = None, weights_dir: Optional[str] = None) -> dict:
     """Split this twin's well-predicted neurons into sparse / non-sparse by ImageNet-screening skewness.

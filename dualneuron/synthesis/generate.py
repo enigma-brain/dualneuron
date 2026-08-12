@@ -79,8 +79,10 @@ _FOURIER_PARAMS = {
 _ASCEND = {"pixel": pixel_ascending, "fourier": fourier_ascending}
 _ASCEND_PARAMS = {"pixel": _PIXEL_PARAMS, "fourier": _FOURIER_PARAMS}
 
+_UNSET = object()   # sentinel: an override the caller did not set (None is a real value)
 
-def _ascend_params(spec, device):
+
+def _ascend_params(spec, device, overrides=None):
     """Assemble the full ascent kwargs for a twin: the method's algorithm params + the twin geometry
     (image_size, values_range, target_norm, and channels for the pixel method) from the registry.
 
@@ -94,7 +96,45 @@ def _ascend_params(spec, device):
                   target_norm=registry.resolve_synth_norm(spec.area, spec.backbone), device=device)
     if spec.synth_method == "pixel":
         params["channels"] = spec.channels
+    else:
+        # The natural-amplitude prior must match the twin's channel count; fourier_ascending infers
+        # the channels from it. Inert for the 3-channel V4 twins, required for a 1-channel twin.
+        params["magnitude_path"] = "natural_rgb.npy" if spec.channels == 3 else "natural_gray.npy"
+    if overrides:
+        # Explicit per-run overrides (e.g. total_steps, target_norm=None to drop the L2 constraint).
+        # Kept out of _ASCEND_PARAMS so the defaults that produced the published MEIs are untouched.
+        params.update({k: v for k, v in overrides.items() if v is not _UNSET})
     return params
+
+
+def _axis_scores(model, neuron_id, results, axis_vecs, ctx, device):
+    """Per seed and pole: the cosine achieved against that seed's axis, and the response percentile.
+
+    The cosine is formed exactly as the ascent's objective does -- z-score the population over the
+    support with the context's mean/std, unit-normalize, dot with the axis -- but evaluated on the
+    final clean image rather than the jittered crops the optimizer saw, so it scores what the run
+    actually produced. The percentile places the response in this neuron's own screened distribution;
+    it is rank-based, so the z-scored context column gives the same answer as the raw responses.
+    """
+    col = ctx["pos"][int(neuron_id)]
+    natural = np.sort(np.asarray(ctx["zmat"][:, col]))
+    mean = torch.as_tensor(ctx["mean"], device=device)
+    std = torch.as_tensor(ctx["std"], device=device)
+    support = torch.as_tensor(ctx["support"], device=device, dtype=torch.long)
+
+    out = {}
+    for pole, _ in (("mei", 1), ("lei", -1)):
+        imgs = torch.as_tensor(np.stack(results[f"{pole}_image"]), device=device)
+        with torch.no_grad():
+            pop = model(imgs)                                  # (seeds, N)
+            z = (pop[:, support] - mean) / std
+            z = z / (z.norm(dim=1, keepdim=True) + 1e-8)
+            cos = torch.stack([z[i] @ torch.as_tensor(axis_vecs[i], device=device)
+                               for i in range(len(axis_vecs))]).cpu().numpy()
+            zt = ((pop[:, support][:, col] - mean[col]) / std[col]).cpu().numpy()
+        out[f"{pole}_cos"] = cos.astype(np.float32)
+        out[f"{pole}_percentile"] = (np.searchsorted(natural, zt) / len(natural) * 100).astype(np.float32)
+    return out
 
 
 def _objective(model, neuron_id, weight):
@@ -102,7 +142,8 @@ def _objective(model, neuron_id, weight):
     return lambda images: weight * torch.mean(model(images)[:, neuron_id])
 
 
-def generate(area, backbone, output_dir=None, num_seeds=10, neurons=None,
+def generate(area, backbone, output_dir=None, num_seeds=10, neurons=None, n_neurons=None,
+             neuron_seed=0, ascend_overrides=None,
              weights_dir=None, mode="free", axis_pool=100, axis_sample=15,
              axis_dataset="imagenet", axis_field="full", rewrite=False, device="cuda",
              log_path=None, log_every=30.0):
@@ -162,10 +203,12 @@ def generate(area, backbone, output_dir=None, num_seeds=10, neurons=None,
     weights_dir = weights_dir or registry.weights_dir(area, backbone)
 
     if neurons is None:
-        neurons = registry.well_predicted_neurons(area, backbone, weights_dir=weights_dir)
+        # A nested reproducible subset: raising n_neurons later continues from the ones already done.
+        neurons = registry.sampled_neurons(area, backbone, n=n_neurons, seed=neuron_seed,
+                                           weights_dir=weights_dir)
     neurons = [int(n) for n in neurons]
     seeds = list(range(num_seeds))               # reproducible, shared across neurons
-    params = _ascend_params(spec, device)
+    params = _ascend_params(spec, device, ascend_overrides)
     ascend = _ASCEND[spec.synth_method]
 
     # "axis" mode folds the drive into the natural population axis a_full (target component KEPT), from
@@ -234,6 +277,7 @@ def generate(area, backbone, output_dir=None, num_seeds=10, neurons=None,
     ):
         results = {f"{pole}_{field}": [] for pole, _ in poles for field in fields}
         axis_ids = {"axis_mai_ids": [], "axis_lai_ids": []}
+        axis_vecs = []
         for seed in seeds:
             torch.manual_seed(seed)
             np.random.seed(seed)
@@ -248,6 +292,7 @@ def generate(area, backbone, output_dir=None, num_seeds=10, neurons=None,
                     exclude_target=False, return_ids=True)
                 axis_ids["axis_mai_ids"].append(mai_ids)
                 axis_ids["axis_lai_ids"].append(lai_ids)
+                axis_vecs.append(axis_vec)
             for pole, weight in poles:
                 if mode == "axis":
                     res = ascend(None, population_function=model, target_index=neuron_id,
@@ -259,14 +304,20 @@ def generate(area, backbone, output_dir=None, num_seeds=10, neurons=None,
                 results[f"{pole}_image"].append(res["image"].detach().cpu().numpy())
                 results[f"{pole}_alpha"].append(res["alpha"].detach().cpu().numpy())
                 results[f"{pole}_activation"].append(float(res["activation"]))
-        # axis mode also records the images each seed's axis was drawn from: with a per-seed rng the
-        # axis is not recoverable from the twin alone, so without these the run is not reproducible.
+        # axis mode also records, per seed and pole: the images each seed's axis was drawn from (with
+        # a per-seed rng the axis is not recoverable from the twin alone), the cosine actually
+        # achieved against that axis -- the objective's own value, so a run records whether it got
+        # what it optimized for -- and where the response lands in this neuron's natural screened
+        # distribution (percentile is rank-based, so the z-scored context gives it exactly).
+        scores = (_axis_scores(model, neuron_id, results, axis_vecs, axis_ctx, device)
+                  if mode == "axis" else {})
         meta = {} if mode == "free" else {                 # keep the free npz byte-identical
             "mode": mode,
             # the saved ids index into this screening; without it they cannot be resolved
             "axis_dataset": axis_dataset,
             "axis_field": axis_field,
-            **{k: np.stack(v) for k, v in axis_ids.items() if v},
+            **{k: np.stack(v) for k, v in axis_ids.items() if len(v)},
+            **scores,                                      # already (seeds,) arrays
         }
         np.savez_compressed(
             out_file(neuron_id),
@@ -297,7 +348,16 @@ if __name__ == '__main__':
     parser.add_argument("--output_dir", type=str, default=None,
                         help="output directory (default: the mode's synthesis[_axis] dir)")
     parser.add_argument("--neurons", type=int, nargs="+", default=None,
-                        help="explicit neuron indices (default: well-predicted set)")
+                        help="explicit neuron indices (default: a --n_neurons subset of the well-predicted set)")
+    parser.add_argument("--n_neurons", type=int, default=None,
+                        help="synthesize a reproducible random subset of this many well-predicted "
+                             "neurons; NESTED, so raising it later continues from the ones already done")
+    parser.add_argument("--neuron_seed", type=int, default=0,
+                        help="seed fixing which neurons --n_neurons picks")
+    parser.add_argument("--total_steps", type=int, default=None,
+                        help="override the method's ascent steps")
+    parser.add_argument("--target_norm", type=str, default=None,
+                        help="override the L2 constraint: a float, or 'none' to drop it entirely")
     parser.add_argument("--weights_dir", type=str, default=None,
                         help="trained-ensemble dir (default: staged for resnet/convnext; "
                              "TRAINED_MODELS_DIR/{area}/{backbone} for dino)")
@@ -334,6 +394,13 @@ if __name__ == '__main__':
         num_seeds=args.num_seeds,
         neurons=args.neurons,
         weights_dir=args.weights_dir,
+        n_neurons=args.n_neurons,
+        neuron_seed=args.neuron_seed,
+        ascend_overrides={
+            "total_steps": _UNSET if args.total_steps is None else args.total_steps,
+            "target_norm": _UNSET if args.target_norm is None else (
+                None if args.target_norm.lower() == "none" else float(args.target_norm)),
+        },
         mode=args.mode,
         axis_pool=args.axis_pool,
         axis_sample=args.axis_sample,
