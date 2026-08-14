@@ -557,7 +557,7 @@ if __name__ == "__main__":
     parser.add_argument("--backbone", type=str, required=True, choices=registry.BACKBONES, help="twin backbone")
     parser.add_argument("--dataset", type=str, default="rendered", help="rendered or imagenet")
     parser.add_argument("--embeddings", type=str, default=None,
-                        help="npz with 'embeddings' and 'indices' (default ANALYSIS_DIR/{area}/{backbone}/dreamsim_{dataset}_embeddings.npz)")
+                        help="npz with 'embeddings' and 'indices' (default ANALYSIS_DIR/{area}/{backbone}/{dataset}/dreamsim/embeddings.npz)")
     parser.add_argument("--output", type=str, default=None,
                         help="npz to save the results (default ANALYSIS_DIR/{area}/{backbone}/{dataset}/dreamsim/similarity.npz)")
     parser.add_argument("--rewrite", action="store_true", help="recompute + overwrite even if results exist")
