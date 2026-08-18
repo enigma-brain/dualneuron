@@ -78,6 +78,18 @@ def _activity_by_image(responses_sorted, indices_sorted, n_images):
     return activity
 
 
+def _index_extent(img_idx, ordered_indices):
+    """``n_images`` for :func:`_activity_by_image`: one past the largest index it will be written at.
+
+    The array is filled at the *screening's* image ids and only then subset to the embedded rows, so
+    sizing it from the embedded subset alone under-allocates whenever that subset misses the tail of
+    the corpus -- which a random draw does roughly half the time. Every unit's indices are a
+    permutation of the same screened set, so one unit gives the screening's extent.
+    """
+    screened = np.asarray(ordered_indices[ordered_indices.files[0]])
+    return int(max(int(np.asarray(img_idx).max()), int(screened.max()))) + 1
+
+
 def _dprime(within, across):
     """
     Discriminability d' between a within-set and an across-(random) distribution.
@@ -303,7 +315,7 @@ def similarity_space_2d(
     E = _center_and_normalize(np.asarray(embeddings))
     img_idx = np.asarray(indices)
     row = _row_of(indices)
-    n_images = int(img_idx.max()) + 1
+    n_images = _index_extent(img_idx, ordered_indices)
     n_emb = len(E)
     rng = np.random.default_rng(seed)
 
@@ -419,7 +431,7 @@ def similarity_space_neuron(
     E = _center_and_normalize(np.asarray(embeddings))
     img_idx = np.asarray(indices)
     row = _row_of(indices)
-    n_images = int(img_idx.max()) + 1
+    n_images = _index_extent(img_idx, ordered_indices)
     rng = np.random.default_rng(seed)
 
     order = np.asarray(ordered_indices[f'unit_{neuron}'])
