@@ -31,12 +31,15 @@ load_dotenv()
 #   fine_tune   False -> frozen core, cache features, train readout only
 #               True  -> fine-tune the (truncated) backbone + readout on cached images
 #   block       DINO transformer block to read out (V4=4, V1=1); layer_name for nnvision cores
-#   readout_nonlin  post-BatchNorm, pre-readout nonlinearity ("relu" V4, "gelu" V1); for nnvision
-#               cores it is built into the core (OutNonlin), for DINO it is applied explicitly so the
-#               DINO twin mirrors its area's task-driven head exactly.
+#   readout_nonlin  post-BatchNorm, pre-readout nonlinearity; for the nnvision cores it is built into
+#               the core (OutNonlin), for DINO it is applied explicitly. The task-driven cores use
+#               ReLU in V4 and GELU in V1; both DINO twins use GELU, so the V4 pair is deliberately
+#               NOT matched on this -- v4/resnet reads out after a ReLU, v4/dino after a GELU. Keep
+#               that in mind when attributing a v4 resnet-vs-dino difference to the backbone.
 #   elu_offset  output nonlinearity is ELU(x + elu_offset) + 1 (matches nnvision EncoderShifter).
-#   gamma_readout  weight of the readout L1 term (gamma * mean|readout features|); V4=3.0 (verified),
-#               V1=10.0. Overridable per run via --gamma_readout.
+#   gamma_readout  weight of the readout L1 term: gamma * sum|readout channel weights|, the summed
+#               convention nnvision regularized under (see TrainableTwin.regularizer). V4=3.0,
+#               V1=10.0 -- each area's nnvision config value. Overridable per run via --gamma_readout.
 #   batch_size  training batch size (and the default for feature/image caching); V4=64, V1=128 --
 #               each area's original nnvision dataset config. Overridable per run via --batch_size.
 TWIN_SPECS = {
@@ -83,13 +86,18 @@ class TrainConfig:
     init_sigma_range: float = 0.6
     val_fraction: float = 0.2
 
-    # Optimization (Adam + ReduceLROnPlateau, early-stop after lr_decay_steps reductions).
-    lr: float = 1e-3
+    # Optimization (Adam + ReduceLROnPlateau, early-stop after lr_decay_steps reductions). These are
+    # nnvision's trainer defaults, which is the regime the shipped twins were produced under:
+    # lr_init 5e-3, factor 0.3, patience 5, an *absolute* plateau threshold of 1e-6, an LR floor of
+    # 1e-4, 3 decays and at most 100 epochs. No gradient clipping, also as there.
+    lr: float = 5e-3
     weight_decay: float = 0.0
     lr_decay_factor: float = 0.3
     lr_decay_patience: int = 5
-    lr_decay_steps: int = 4
-    max_epochs: int = 200
+    lr_decay_steps: int = 3
+    lr_threshold: float = 1e-6
+    min_lr: float = 1e-4
+    max_epochs: int = 100
     # NOT the train/val split seed: each ensemble member is split (and initialized) with its OWN
     # member seed -- the 1..5 of ``--seeds``, passed straight to ``split_train_val`` in the trainer --
     # so the members differ in both init and split. Nothing reads this field.

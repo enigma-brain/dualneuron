@@ -7,16 +7,27 @@ trains the (cheap) trainable head on them and saves a 5-member ensemble per ``(a
 The trainable head differs by backbone but follows one contract — ``BatchNorm -> (ReLU) -> Gaussian
 readout -> ELU+1`` on top of the frozen feature map:
 
-* ``dino``   — a fresh ``BatchNorm2d`` + ``FullGaussian2dReadout`` (no backbone needed at train time,
-  since features are cached); saved as ``{readout_state_dict, norm_state_dict}`` for ``V4ColorDino``.
-* ``resnet`` — the nnvision twin with its frozen robust core, its readout re-initialized and
-  ``OutBatchNorm`` reset (= "frozen pretrained core + untrained readout"); saved as the full nnvision
+* ``dino``   — a fresh ``BatchNorm2d`` + a :class:`~dualneuron.twins.layers.FullGaussian2d` readout (no
+  backbone needed at train time, since features are cached); saved as
+  ``{readout_state_dict, norm_state_dict}`` for ``V4ColorDino``.
+* ``resnet`` — the task-driven twin with its frozen robust core, its readout re-initialized and
+  ``OutBatchNorm`` reset (= "frozen pretrained core + untrained readout"); saved as the full
   ``state_dict`` for ``V4ColorTaskDriven``.
 
-Loss is a NaN-masked Poisson NLL + the readout regularizer; optimization is Adam +
-ReduceLROnPlateau with early stop after ``lr_decay_steps`` reductions — the established regime.
+Both regimes read out through the *same* readout class with the same initialization, so a
+resnet-vs-dino comparison is a statement about backbones and not about two heads.
+
+The objective follows nnvision's trainer defaults, which is the closest reconstruction available of
+the regime the shipped twins were produced under (nnvision ships several trainer entry points; which
+one was used is not recorded here): a NaN-masked Poisson NLL **summed** over observed entries and
+scaled by ``sqrt(n_train / batch)``, plus ``gamma_readout`` times the
+**summed** readout L1. Optimization is Adam at ``lr=5e-3`` with no gradient clipping, and
+ReduceLROnPlateau on the mean validation correlation (factor 0.3, patience 5, absolute threshold
+1e-6, LR floor 1e-4), stopping after ``lr_decay_steps`` reductions. The loss reduction and the
+regularizer reduction have to move together — see :func:`poisson_loss`.
 """
 
+import math
 import os
 from pathlib import Path
 
@@ -39,15 +50,22 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 
 def poisson_loss(pred, target):
-    """NaN-masked Poisson NLL, averaged over observed entries only.
+    """NaN-masked Poisson NLL, **summed** over observed entries.
 
-    ``pred`` is floored at 1e-3 before the log: ELU+1 is >= 0 but can underflow mid-training, and
-    ``log(1e-8)`` produces huge spurious gradients; ``log(1e-3)`` is a tame floor.
+    Summed rather than averaged because nnvision's trainers default to ``PoissonLoss(avg=False)``,
+    and because it is the reduction the
+    summed readout regularizer in :meth:`TrainableTwin.regularizer` is scaled against. The two must
+    agree: a mean loss against a summed L1 would put the regularizer ~C*N times too high.
+
+    Two deliberate departures from nnvision's ``PoissonLoss``. The NaN mask is unavoidable: the
+    response matrix here has missing entries where nnvision's dataloaders had none. And ``pred`` is
+    floored at 1e-3 before the log rather than offset by 1e-12 — ELU+1 is >= 0 but can underflow
+    mid-training, and ``log(1e-12)`` produces huge spurious gradients where ``log(1e-3)`` is tame.
     """
     mask = ~torch.isnan(target)
     target_clean = torch.where(mask, target, torch.zeros_like(target))
     nll = pred - target_clean * torch.log(pred.clamp(min=1e-3))
-    return (nll * mask).sum() / mask.sum().clamp(min=1)
+    return (nll * mask).sum()
 
 
 def corr_per_neuron(preds, targets):
@@ -138,8 +156,8 @@ class TrainableTwin:
 
     def _build_dino(self, config, device):
         import torch.nn as nn
-        from dualneuron.twins.dino import (
-            DINONeuralPredictor, FullGaussian2dReadout, GaussianReadout, make_nonlinearity)
+        from dualneuron.twins.dino import DINONeuralPredictor, GaussianReadout, make_nonlinearity
+        from dualneuron.twins.layers import FullGaussian2d
         self._offset = config.elu_offset
         if self.fine_tune:
             # Full twin: truncated, grad-enabled backbone + BN + readout_nonlin + readout + ELU.
@@ -155,11 +173,17 @@ class TrainableTwin:
             self._model = None
             self.norm = nn.BatchNorm2d(config.feature_dim, momentum=0.1).to(device)
             self.readout_nonlin = make_nonlinearity(config.readout_nonlin).to(device)
-            ReadoutCls = (FullGaussian2dReadout if config.readout_type == "fullgaussian2d"
-                          else GaussianReadout)
-            self.readout = ReadoutCls(
-                config.n_neurons, config.feature_dim, config.spatial_size,
-                config.init_mu_range, config.init_sigma_range).to(device)
+            if config.readout_type == "fullgaussian2d":
+                # Same class, same init as the task-driven twins' readout: the two backbone
+                # families start training from an identical head.
+                self.readout = FullGaussian2d(
+                    in_shape=(config.feature_dim, config.spatial_size, config.spatial_size),
+                    outdims=config.n_neurons, bias=True, init_mu_range=config.init_mu_range,
+                    init_sigma=config.init_sigma_range, gauss_type="isotropic").to(device)
+            else:
+                self.readout = GaussianReadout(
+                    config.n_neurons, config.feature_dim, config.spatial_size,
+                    config.init_mu_range, config.init_sigma_range).to(device)
 
     def _build_nnvision(self, config, seed, device):
         from dualneuron.twins.nets import load_model, build_convnext_trainable
@@ -204,13 +228,14 @@ class TrainableTwin:
         return [p for p in self._nnv.parameters() if p.requires_grad]
 
     def regularizer(self):
-        # gamma_readout * mean(|Gaussian readout feature weights|) for every twin (mean-based, to
-        # match the Poisson-loss scale; nnvision's readout.regularizer() is sum-based and would swamp it).
-        g = self.config.gamma_readout
-        if self.kind == "dino":
-            ro = self._model.readout if self.fine_tune else self.readout
-            return g * ro.features.abs().mean()
-        return g * self._nnv.readout["all_sessions"]._features.abs().mean()
+        # gamma_readout * sum(|readout channel weights|), the convention the shipped twins were
+        # trained under (nnvision's MultipleFullGaussian2d.regularizer takes feature_l1(average=False)),
+        # paired with the summed Poisson loss below. Written once for both backbone families, since
+        # both readouts expose feature_l1. config.gamma_readout rather than the value baked into the
+        # readout, so --gamma_readout still overrides it.
+        ro = ((self._model.readout if self.fine_tune else self.readout) if self.kind == "dino"
+              else self._nnv.readout["all_sessions"])
+        return self.config.gamma_readout * ro.feature_l1(average=False)
 
     def train_mode(self):
         if self.kind == "dino":
@@ -339,12 +364,18 @@ def _train_one(config, seed, train_feat, train_resp, train_idx, val_idx,
     twin = build_trainable_twin(config, seed, device)
     params = twin.trainable_parameters()
     opt = torch.optim.Adam(params, lr=config.lr, weight_decay=config.weight_decay)
+    # Absolute threshold and a floor on the LR, as nnvision's trainer configured it: a relative
+    # threshold would scale the "is this an improvement?" test with the correlation itself.
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        opt, mode="max", factor=config.lr_decay_factor, patience=config.lr_decay_patience)
+        opt, mode="max", factor=config.lr_decay_factor, patience=config.lr_decay_patience,
+        threshold=config.lr_threshold, threshold_mode="abs", min_lr=config.min_lr)
 
     train_loader, val_loader, test_loader = _loaders(
         config, train_feat, train_resp, train_idx, val_idx, test_feat, test_resp)
     val_targets = train_resp[val_idx]
+    # The summed Poisson loss is scaled by sqrt(n_train / batch) so the objective a single batch
+    # reports is comparable to the whole training set's -- nnvision's `scale_loss`.
+    n_train = len(train_loader.dataset)
     best_val, best_snap, n_decays, prev_lr = -1.0, None, 0, config.lr
 
     for epoch in range(1, config.max_epochs + 1):
@@ -353,10 +384,10 @@ def _train_one(config, seed, train_feat, train_resp, train_idx, val_idx,
         for feat, t in train_loader:
             f = feat.to(device, non_blocking=True).float()
             t = t.to(device, non_blocking=True)
-            loss = poisson_loss(twin.forward(f), t) + twin.regularizer()
+            loss_scale = math.sqrt(n_train / f.shape[0])
+            loss = loss_scale * poisson_loss(twin.forward(f), t) + twin.regularizer()
             opt.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(params, 1.0)
             opt.step()
             ep_loss += float(loss)
             n_batches += 1

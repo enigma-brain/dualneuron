@@ -75,7 +75,7 @@ uv sync                              # env + GPU torch (CUDA 12.1 index)
 source .venv/bin/activate            # or prefix commands with `uv run`
 ```
 
-> **Use `uv sync`.** `nnfabrik` (0.2.2) imports `from datajoint.schemas import Schema`, removed in DataJoint 2.2, so the twins fail to import on DataJoint ≥ 2.2. The lockfile pins `datajoint<2.2` (2.1.1). If you install manually, keep that constraint: `pip install "datajoint<2.2"`.
+> **No git dependencies.** The twin architecture used to come from `nnvision`, installed from a branch, which dragged in `nnfabrik`, `mei`, `datajoint`, `neuralpredictors`, `ptrnets` and `CORnet` — and forced a `datajoint<2.2` pin, because `nnfabrik` 0.2.2 imports a `Schema` symbol DataJoint 2.2 removed. That architecture now lives in [`dualneuron/twins/layers.py`](dualneuron/twins/layers.py), so every dependency resolves from PyPI. `python -m dualneuron.twins.verify` checks that the twins it builds are still the ones the shipped weights expect.
 
 ## Configuration
 
@@ -163,7 +163,7 @@ m = load_model("v4", ensemble=True, weights_dir=".../trained_models/v4/resnet")
 receptive-field positions (for predicting recorded responses).
 
 The per-twin loaders can also be imported directly. They take the same arguments as `load_model`, but
-return the model where nnvision built it (core on `cuda:0`, readout on CPU), so call `.eval().to(device)`
+return the model where the builder left it (core on `cuda:0`, readout on CPU), so call `.eval().to(device)`
 yourself — `load_model` does that for you:
 
 ```python

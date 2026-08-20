@@ -10,22 +10,37 @@ readme = "README.md"
 authors = [{ name = "Nikos Karantzas" }]
 requires-python = ">=3.10"
 license = { text = "MIT" }
+# Every entry here is imported directly by dualneuron. The twin architecture used to arrive through
+# "nnvision @ git+...@interview", which dragged in nnfabrik, mei, datajoint (hence the old
+# "datajoint<2.2" pin, needed because nnfabrik 0.2.2 imports a Schema symbol DataJoint 2.2 removed),
+# neuralpredictors, ptrnets, CORnet and their transitive baggage. It now lives in
+# dualneuron.twins.layers, so nothing here is a git dependency. Several packages below were
+# previously undeclared and only present because nnvision happened to require them.
 dependencies = [
-	"nnvision @ git+https://github.com/KonstantinWilleke/nnvision.git@interview",
 	"datasets",
-	"opencv-python",
-	"python-dotenv",
 	"dreamsim",
-	"datajoint<2.2",
-	"torch",
-	"torchvision",
 	"ftfy>=6.3.1",
+	"huggingface-hub",
+	"ipython",
+	"matplotlib",
+	"numpy",
 	"omegaconf>=2.3.1",
+	"opencv-python",
+	"pandas",
+	"pillow",
+	"python-dotenv",
 	"regex>=2026.5.9",
+	"safetensors",
+	"scikit-image",
 	"scikit-learn>=1.7.2",
+	"scipy",
 	"submitit>=1.5.4",
 	"termcolor>=3.3.0",
+	"torch",
 	"torchmetrics>=1.9.0",
+	"torchvision",
+	"tqdm",
+	"transformers",
 ]
 
 [tool.setuptools.packages.find]

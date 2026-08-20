@@ -16,10 +16,14 @@ warnings.filterwarnings('ignore')
 import torch
 import os
 import numpy as np
-from mei.modules import EnsembleModel
-from nnfabrik.builder import get_model
 import torchvision.models as models
 
+from dualneuron.twins.builders import (
+    build_model,
+    convnext_core_gauss_readout,
+    task_core_gauss_readout
+)
+from dualneuron.twins.layers import EnsembleModel
 from dualneuron.twins.activations import (
     ActivationExtractor,
     count_units
@@ -88,7 +92,7 @@ def V4ColorTaskDriven(
         - Normalization: mean=113.5, std=59.58
     """
     
-    model_fn = 'nnvision.models.ptrmodels.task_core_gauss_readout'
+    model_fn = task_core_gauss_readout
     model_config = {
         'input_channels': 3,
         'model_name': 'resnet50_l2_eps0_1',
@@ -123,7 +127,7 @@ def V4ColorTaskDriven(
     models_list = []
     for i, filename in enumerate(member_paths):
         state_dict = torch.load(filename, map_location='cpu')
-        model = get_model(
+        model = build_model(
             model_fn,
             model_config,
             seed=10,
@@ -179,7 +183,7 @@ def V4ColorDataDriven(
         - Normalization: mean=113.5, std=59.58
     """
 
-    model_fn = 'nnvision.models.ptrmodels.task_core_gauss_readout'
+    model_fn = task_core_gauss_readout
     model_config = {
         'input_channels': 3,
         'model_name': 'resnet50_l2_eps0_1',
@@ -214,7 +218,7 @@ def V4ColorDataDriven(
     models_list = []
     for i, filename in enumerate(member_paths):
         state_dict = torch.load(filename, map_location='cpu')
-        model = get_model(
+        model = build_model(
             model_fn,
             model_config,
             seed=10,
@@ -237,12 +241,18 @@ def V4ColorDataDriven(
 # Single source of truth for the V1 ConvNeXt architecture, shared by the loader
 # (:func:`V1GrayTaskDriven`) and the training-start builder (:func:`build_convnext_trainable`), so
 # weights trained by ``dualneuron.training`` load back through ``V1GrayTaskDriven(weights_dir=...)``.
-_V1_CONVNEXT_MODEL_FN = 'nnvision.models.ptrmodels.convnext_core_gauss_readout'
+_V1_CONVNEXT_MODEL_FN = convnext_core_gauss_readout
 
 
 def _v1_convnext_config(pretrained):
-    """nnvision model_config for the V1 ConvNeXt twin. ``pretrained`` keeps the ImageNet backbone
-    (True) or re-randomizes it in ``ConvNextCore.initialize`` (False)."""
+    """Architecture config for the V1 ConvNeXt twin. ``pretrained`` keeps the ImageNet backbone
+    (True) or re-randomizes it in ``ConvNextCore.initialize`` (False).
+
+    ``momentum`` is deliberately not set: :func:`~dualneuron.twins.builders.convnext_core_gauss_readout`
+    defaults it to 0.9, where the three task-driven configs pass 0.1 explicitly. So this twin's
+    ``OutBatchNorm`` tracks its running statistics an order of magnitude faster than the V4 twins' —
+    inherited from the architecture the shipped weights came from, not a choice made here. It is not
+    a state_dict entry, so it affects retraining only, never loading."""
     return {
         'model_name': 'facebook/convnextv2-atto-1k-224',
         'layer_name': 'convnextv2.encoder.stages.1.layers.0',
@@ -269,8 +279,8 @@ def build_convnext_trainable(seed, device):
     the trained state_dict loads via ``V1GrayTaskDriven(weights_dir=...)``. ``seed`` varies the
     readout init across ensemble members.
     """
-    model = get_model(_V1_CONVNEXT_MODEL_FN, _v1_convnext_config(pretrained=True),
-                      seed=seed, data_info=_v1_convnext_data_info(), state_dict=None)
+    model = build_model(_V1_CONVNEXT_MODEL_FN, _v1_convnext_config(pretrained=True),
+                        seed=seed, data_info=_v1_convnext_data_info(), state_dict=None)
     return model.to(device)
 
 
@@ -320,7 +330,7 @@ def V1GrayTaskDriven(
         torch.manual_seed(i)
         state_dict = torch.load(filename, map_location='cpu')
 
-        model = get_model(
+        model = build_model(
             model_fn, 
             model_config, 
             seed=10, 
@@ -385,7 +395,7 @@ def V4GrayTaskDriven(
         than V4ColorTaskDriven.
     """
     
-    model_fn = 'nnvision.models.ptrmodels.task_core_gauss_readout'
+    model_fn = task_core_gauss_readout
     model_config = {
         'input_channels': 1,
         'model_name': 'resnet50_l2_eps0_1',
@@ -420,7 +430,7 @@ def V4GrayTaskDriven(
         torch.manual_seed(i)
         state_dict = torch.load(filename, map_location='cpu')
 
-        model = get_model(
+        model = build_model(
             model_fn, 
             model_config, 
             seed=10, 
